@@ -28,7 +28,7 @@ from PIL import Image
 import google.generativeai as genai
 
 # ── 고정 상수 ─────────────────────────────────────────────────────
-GEMINI_MODEL = "gemini-2.0-flash"
+GEMINI_MODEL = "gemini-robotics-er-1.6-preview"
 
 # 토큰 옵션: (표시 라벨, 권장 글자수 상한, max_output_tokens)
 TOKEN_OPTIONS = [
