@@ -105,12 +105,13 @@ st.markdown("""
 
 # ── 세션 상태 초기화 ──────────────────────────────────────────────
 _defaults = {
-    "ocr_text":      "",
-    "orig_text":     "",
-    "edited_text":   "",
-    "criteria":      [],
-    "score":         None,
-    "analysis_done": False,
+    "ocr_text":        "",
+    "orig_text":       "",
+    "edited_text":     "",
+    "criteria":        [],
+    "score":           None,
+    "analysis_done":   False,
+    "available_models": [],
 }
 for k, v in _defaults.items():
     if k not in st.session_state:
@@ -145,22 +146,29 @@ with st.sidebar:
         placeholder="AIzaSy...",
     )
 
+    # 사용 가능한 모델 자동 조회
+    if gemini_key:
+        if st.button("🔄 사용 가능한 모델 조회", use_container_width=True):
+            with st.spinner("모델 목록 조회 중..."):
+                st.session_state["available_models"] = list_gemini_models(gemini_key)
+
+    model_options = st.session_state.get(
+        "available_models",
+        ["gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-2.0-flash", "gemini-1.5-pro", "gemini-pro"],
+    )
+
     gemini_model = st.selectbox(
         "Gemini 모델",
-        options=[
-            "gemini-1.5-flash",
-            "gemini-1.5-flash-8b",
-            "gemini-2.0-flash",
-            "gemini-1.5-pro",
-        ],
+        options=model_options,
         index=0,
-        help="무료 티어 추천: gemini-1.5-flash (일 1,500회 무료)",
+        help="'모델 조회' 버튼으로 이 키에서 실제 사용 가능한 모델을 확인하세요",
     )
     st.caption({
-        "gemini-1.5-flash":    "✅ 무료 1,500회/일 — 추천",
-        "gemini-1.5-flash-8b": "✅ 무료 가장 넉넉",
-        "gemini-2.0-flash":    "⚠️ 무료 한도 매우 적음",
+        "gemini-1.5-flash":    "✅ 무료 1,500회/일",
+        "gemini-1.5-flash-8b": "✅ 무료, 가장 빠름",
+        "gemini-2.0-flash":    "⚠️ 무료 한도 적음",
         "gemini-1.5-pro":      "💎 고품질, 무료 50회/일",
+        "gemini-pro":          "🔵 기본 모델 (구버전)",
     }.get(gemini_model, ""))
 
     keys_ok = bool(vision_key) and bool(gemini_key)
@@ -247,8 +255,34 @@ def run_ocr(image: Image.Image, api_key: str) -> str:
     return text
 
 
+def list_gemini_models(api_key: str) -> list[str]:
+    """이 API 키로 사용 가능한 Gemini 모델 목록 조회"""
+    preferred_order = [
+        "gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-1.5-pro",
+        "gemini-2.0-flash", "gemini-pro",
+    ]
+    try:
+        resp = requests.get(
+            f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}",
+            timeout=10,
+        )
+        data = resp.json()
+        available = [
+            m["name"].replace("models/", "")
+            for m in data.get("models", [])
+            if "generateContent" in m.get("supportedGenerationMethods", [])
+            and "gemini" in m.get("name", "")
+        ]
+        # 선호 순서로 정렬
+        ordered = [m for m in preferred_order if m in available]
+        rest = [m for m in available if m not in preferred_order]
+        return ordered + rest or preferred_order
+    except Exception:
+        return preferred_order
+
+
 def call_gemini(prompt: str, api_key: str, model: str = "gemini-1.5-flash") -> str:
-    """Gemini Python SDK로 호출 — 엔드포인트/버전 자동 처리"""
+    """Gemini Python SDK로 호출"""
     genai.configure(api_key=api_key)
     try:
         m = genai.GenerativeModel(model)
@@ -267,7 +301,7 @@ def call_gemini(prompt: str, api_key: str, model: str = "gemini-1.5-flash") -> s
             wait_msg = f" ({retry_sec.group(1)}초 후 재시도)" if retry_sec else ""
             raise RuntimeError(
                 f"Gemini 무료 할당량 초과{wait_msg}.\n"
-                f"사이드바에서 **gemini-1.5-flash-8b** 로 변경하거나 잠시 후 다시 시도해주세요."
+                f"사이드바에서 다른 모델로 변경하거나 잠시 후 다시 시도해주세요."
             )
         raise RuntimeError(msg)
 
