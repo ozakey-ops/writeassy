@@ -27,7 +27,7 @@ from PIL import Image
 import google.generativeai as genai
 
 # ── 고정 상수 ─────────────────────────────────────────────────────
-GEMINI_MODEL = "gemini-robotics-er-1.6-preview"   # 사용 모델
+GEMINI_MODEL = "gemini-2.0-flash"   # 사용 모델
 
 # ── 페이지 설정 ────────────────────────────────────────────────────
 st.set_page_config(
@@ -136,27 +136,6 @@ with st.sidebar:
         if not VISION_KEY: missing.append("VISION_API_KEY")
         if not GEMINI_KEY:  missing.append("GEMINI_API_KEY")
         st.caption(f"누락된 키: {', '.join(missing)}")
-
-    st.divider()
-    st.markdown("**📌 키 설정 방법**")
-    with st.expander("로컬 실행 (.streamlit/secrets.toml)"):
-        st.code("""# .streamlit/secrets.toml
-VISION_API_KEY = "AIzaSy..."
-GEMINI_API_KEY = "AIzaSy..." """, language="toml")
-
-    with st.expander("환경변수로 실행"):
-        st.code("""export VISION_API_KEY="AIzaSy..."
-export GEMINI_API_KEY="AIzaSy..."
-streamlit run app.py""", language="bash")
-
-    with st.expander("Streamlit Cloud 배포"):
-        st.markdown("""
-앱 대시보드 → **Settings → Secrets** 탭에 아래 입력:
-```toml
-VISION_API_KEY = "AIzaSy..."
-GEMINI_API_KEY = "AIzaSy..."
-```
-        """)
 
     st.divider()
     if st.button("🔄 처음부터 다시", use_container_width=True):
