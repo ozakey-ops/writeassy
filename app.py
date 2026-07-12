@@ -105,17 +105,43 @@ st.markdown("""
 
 # ── 세션 상태 초기화 ──────────────────────────────────────────────
 _defaults = {
-    "ocr_text":        "",
-    "orig_text":       "",
-    "edited_text":     "",
-    "criteria":        [],
-    "score":           None,
-    "analysis_done":   False,
+    "ocr_text":         "",
+    "orig_text":        "",
+    "edited_text":      "",
+    "criteria":         [],
+    "score":            None,
+    "analysis_done":    False,
     "available_models": [],
 }
 for k, v in _defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
+
+
+# ── 유틸: 모델 목록 조회 (사이드바보다 먼저 정의) ─────────────────
+def list_gemini_models(api_key: str) -> list[str]:
+    """이 API 키로 사용 가능한 Gemini 모델 목록 조회"""
+    preferred_order = [
+        "gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-1.5-pro",
+        "gemini-2.0-flash", "gemini-pro",
+    ]
+    try:
+        resp = requests.get(
+            f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}",
+            timeout=10,
+        )
+        data = resp.json()
+        available = [
+            m["name"].replace("models/", "")
+            for m in data.get("models", [])
+            if "generateContent" in m.get("supportedGenerationMethods", [])
+            and "gemini" in m.get("name", "")
+        ]
+        ordered = [m for m in preferred_order if m in available]
+        rest = [m for m in available if m not in preferred_order]
+        return ordered + rest or preferred_order
+    except Exception:
+        return preferred_order
 
 
 # ── 사이드바: API 키 입력 ────────────────────────────────────────
@@ -253,32 +279,6 @@ def run_ocr(image: Image.Image, api_key: str) -> str:
     if not text:
         raise RuntimeError("텍스트를 찾을 수 없습니다. 더 선명한 사진을 사용해주세요.")
     return text
-
-
-def list_gemini_models(api_key: str) -> list[str]:
-    """이 API 키로 사용 가능한 Gemini 모델 목록 조회"""
-    preferred_order = [
-        "gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-1.5-pro",
-        "gemini-2.0-flash", "gemini-pro",
-    ]
-    try:
-        resp = requests.get(
-            f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}",
-            timeout=10,
-        )
-        data = resp.json()
-        available = [
-            m["name"].replace("models/", "")
-            for m in data.get("models", [])
-            if "generateContent" in m.get("supportedGenerationMethods", [])
-            and "gemini" in m.get("name", "")
-        ]
-        # 선호 순서로 정렬
-        ordered = [m for m in preferred_order if m in available]
-        rest = [m for m in available if m not in preferred_order]
-        return ordered + rest or preferred_order
-    except Exception:
-        return preferred_order
 
 
 def call_gemini(prompt: str, api_key: str, model: str = "gemini-1.5-flash") -> str:
