@@ -12,6 +12,7 @@ import base64
 import io
 import json
 import re
+import time
 from PIL import Image
 from datetime import datetime
 import google.generativeai as genai
@@ -282,28 +283,31 @@ def run_ocr(image: Image.Image, api_key: str) -> str:
 
 
 def call_gemini(prompt: str, api_key: str, model: str = "gemini-1.5-flash") -> str:
-    """Gemini Python SDK로 호출"""
+    """Gemini Python SDK로 호출 — 할당량 초과 시 자동 대기 후 1회 재시도"""
     genai.configure(api_key=api_key)
-    try:
-        m = genai.GenerativeModel(model)
-        response = m.generate_content(
-            prompt,
-            generation_config=genai.GenerationConfig(
-                temperature=0.3,
-                max_output_tokens=2048,
-            ),
-        )
-        return response.text
-    except Exception as e:
-        msg = str(e)
-        if "quota" in msg.lower() or "429" in msg:
-            retry_sec = re.search(r"retry in ([\d.]+)s", msg)
-            wait_msg = f" ({retry_sec.group(1)}초 후 재시도)" if retry_sec else ""
-            raise RuntimeError(
-                f"Gemini 무료 할당량 초과{wait_msg}.\n"
-                f"사이드바에서 다른 모델로 변경하거나 잠시 후 다시 시도해주세요."
-            )
-        raise RuntimeError(msg)
+    gm = genai.GenerativeModel(model)
+    cfg = genai.GenerationConfig(temperature=0.3, max_output_tokens=2048)
+
+    for attempt in range(2):          # 최대 2회 시도
+        try:
+            return gm.generate_content(prompt, generation_config=cfg).text
+        except Exception as e:
+            msg = str(e)
+            is_quota = "quota" in msg.lower() or "429" in msg or "RESOURCE_EXHAUSTED" in msg
+            if is_quota and attempt == 0:
+                # 오류 메시지에서 대기 시간 파싱, 없으면 60초 기본
+                m_sec = re.search(r"retry[^\d]*([\d.]+)\s*s", msg)
+                wait = float(m_sec.group(1)) + 3 if m_sec else 63
+                # Streamlit spinner가 유지되는 동안 서버에서 대기
+                st.toast(f"⏳ 할당량 초과 — {wait:.0f}초 대기 후 자동 재시도합니다...")
+                time.sleep(wait)
+                continue      # 재시도
+            if is_quota:
+                raise RuntimeError(
+                    "Gemini 무료 할당량이 꽉 찼습니다.\n"
+                    "사이드바에서 **gemini-1.5-flash-8b** 로 변경하거나 1분 후 다시 시도해주세요."
+                )
+            raise RuntimeError(msg)
 
 
 def render_criteria(criteria: list):
