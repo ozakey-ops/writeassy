@@ -14,6 +14,7 @@ import json
 import re
 from PIL import Image
 from datetime import datetime
+import google.generativeai as genai
 
 # ── 페이지 설정 ────────────────────────────────────────────────────
 st.set_page_config(
@@ -247,33 +248,28 @@ def run_ocr(image: Image.Image, api_key: str) -> str:
 
 
 def call_gemini(prompt: str, api_key: str, model: str = "gemini-1.5-flash") -> str:
-    """Gemini API 호출 (모델 선택 가능, 할당량 오류 친절 처리)"""
-    # 1.5 계열은 v1, 2.0 계열은 v1beta 엔드포인트 사용
-    api_version = "v1beta" if "2.0" in model else "v1"
-    resp = requests.post(
-        f"https://generativelanguage.googleapis.com/{api_version}/models/"
-        f"{model}:generateContent?key={api_key}",
-        json={
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.3, "maxOutputTokens": 2048},
-        },
-        timeout=60,
-    )
-    data = resp.json()
-    if "error" in data:
-        msg = data["error"].get("message", "")
-        # 할당량 초과 — 사용자 친화적 메시지
-        if "quota" in msg.lower() or "429" in str(data["error"].get("code", "")):
-            import re as _re
-            retry_sec = _re.search(r"retry in ([\d.]+)s", msg)
+    """Gemini Python SDK로 호출 — 엔드포인트/버전 자동 처리"""
+    genai.configure(api_key=api_key)
+    try:
+        m = genai.GenerativeModel(model)
+        response = m.generate_content(
+            prompt,
+            generation_config=genai.GenerationConfig(
+                temperature=0.3,
+                max_output_tokens=2048,
+            ),
+        )
+        return response.text
+    except Exception as e:
+        msg = str(e)
+        if "quota" in msg.lower() or "429" in msg:
+            retry_sec = re.search(r"retry in ([\d.]+)s", msg)
             wait_msg = f" ({retry_sec.group(1)}초 후 재시도)" if retry_sec else ""
             raise RuntimeError(
                 f"Gemini 무료 할당량 초과{wait_msg}.\n"
-                f"왼쪽 사이드바에서 **gemini-1.5-flash** 또는 **gemini-1.5-flash-8b** 로 변경하거나, "
-                f"잠시 후 다시 시도해주세요."
+                f"사이드바에서 **gemini-1.5-flash-8b** 로 변경하거나 잠시 후 다시 시도해주세요."
             )
         raise RuntimeError(msg)
-    return data["candidates"][0]["content"]["parts"][0]["text"]
 
 
 def render_criteria(criteria: list):
