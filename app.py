@@ -248,8 +248,10 @@ def run_ocr(image: Image.Image, api_key: str) -> str:
 
 def call_gemini(prompt: str, api_key: str, model: str = "gemini-1.5-flash") -> str:
     """Gemini API 호출 (모델 선택 가능, 할당량 오류 친절 처리)"""
+    # 1.5 계열은 v1, 2.0 계열은 v1beta 엔드포인트 사용
+    api_version = "v1beta" if "2.0" in model else "v1"
     resp = requests.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"https://generativelanguage.googleapis.com/{api_version}/models/"
         f"{model}:generateContent?key={api_key}",
         json={
             "contents": [{"parts": [{"text": prompt}]}],
