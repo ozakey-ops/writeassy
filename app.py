@@ -19,6 +19,7 @@ import io
 import json
 import time
 import base64
+import difflib
 from datetime import datetime
 
 import streamlit as st
@@ -27,7 +28,15 @@ from PIL import Image
 import google.generativeai as genai
 
 # ── 고정 상수 ─────────────────────────────────────────────────────
-GEMINI_MODEL = "gemini-robotics-er-1.6-preview"   # 사용 모델
+GEMINI_MODEL = "gemini-2.0-flash"
+
+# 토큰 옵션: (표시 라벨, 권장 글자수 상한, max_output_tokens)
+TOKEN_OPTIONS = [
+    ("소형 · 2,048 토큰",  500,   2048),
+    ("중형 · 4,096 토큰",  1500,  4096),
+    ("대형 · 8,192 토큰",  4000,  8192),
+    ("특대 · 16,384 토큰", 99999, 16384),
+]
 
 # ── 페이지 설정 ────────────────────────────────────────────────────
 st.set_page_config(
@@ -45,8 +54,13 @@ st.markdown("""
 .result-box {
     background: #eef2ff; border-left: 4px solid #4f46e5;
     border-radius: 12px; padding: 18px 20px;
-    line-height: 2.1; white-space: pre-wrap;
-    font-size: 14px; color: #111827; margin-bottom: 4px;
+    line-height: 2.1; font-size: 14px; color: #111827; margin-bottom: 4px;
+}
+.diff-box {
+    background: #f9fafb; border-left: 4px solid #4f46e5;
+    border-radius: 12px; padding: 18px 20px;
+    line-height: 2.4; font-size: 14px; color: #111827; margin-bottom: 4px;
+    white-space: pre-wrap; word-break: break-word;
 }
 .orig-box {
     background: #f9fafb; border-left: 4px solid #d1d5db;
@@ -54,6 +68,14 @@ st.markdown("""
     line-height: 2.1; white-space: pre-wrap;
     font-size: 14px; color: #6b7280;
 }
+
+/* 변경 하이라이트 */
+.da { background: #bbf7d0; color: #14532d;
+      border-radius: 4px; padding: 1px 3px; font-weight: 600; }
+.dd { background: #fecaca; color: #7f1d1d;
+      border-radius: 4px; padding: 1px 3px;
+      text-decoration: line-through; opacity: 0.75; }
+
 .c-item {
     background: #f3f4f6; border-radius: 10px;
     padding: 11px 15px; margin-bottom: 8px;
@@ -78,6 +100,11 @@ st.markdown("""
     font-size: 13px; font-weight: 800;
     margin-right: 8px; vertical-align: middle;
 }
+.tok-info {
+    background: #f0f9ff; border: 1px solid #bae6fd;
+    border-radius: 10px; padding: 10px 14px;
+    font-size: 12px; color: #0369a1; margin-bottom: 8px;
+}
 .setup-box {
     background: #fefce8; border: 1px solid #fde047;
     border-radius: 12px; padding: 20px 22px;
@@ -87,13 +114,15 @@ st.markdown("""
     background: #fef9c3; padding: 2px 6px;
     border-radius: 5px; font-size: 12px;
 }
+.legend { font-size: 12px; color: #6b7280; margin-bottom: 8px; }
+.legend .da { font-size: 12px; }
+.legend .dd { font-size: 12px; }
 </style>
 """, unsafe_allow_html=True)
 
 
-# ── API 키 로드 (소스코드에 키 없음) ─────────────────────────────
+# ── API 키 로드 ───────────────────────────────────────────────────
 def _load_key(name: str) -> str:
-    """st.secrets → 환경변수 순서로 로드. 없으면 빈 문자열."""
     try:
         val = st.secrets[name]
         if val:
@@ -115,13 +144,14 @@ _defaults = {
     "criteria":      [],
     "score":         None,
     "analysis_done": False,
+    "max_tokens":    2048,
 }
 for k, v in _defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
 
-# ── 사이드바 (키 입력 없음 — 상태 표시만) ────────────────────────
+# ── 사이드바 ──────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## ✍️ 글 첨삭 도우미 Pro")
     st.caption("Google Vision OCR · Gemini AI")
@@ -145,6 +175,39 @@ with st.sidebar:
 
 
 # ── 유틸 함수 ─────────────────────────────────────────────────────
+def esc(s: str) -> str:
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def recommend_tokens(text: str) -> int:
+    """글자 수에 따라 권장 max_output_tokens 반환."""
+    char_cnt = len(text.replace(" ", "").replace("\n", ""))
+    for _, limit, tokens in TOKEN_OPTIONS:
+        if char_cnt <= limit:
+            return tokens
+    return TOKEN_OPTIONS[-1][2]
+
+
+def highlight_diff(original: str, edited: str) -> str:
+    """원문과 첨삭본을 비교해 변경 부분을 HTML로 강조."""
+    orig_words = original.split()
+    edit_words = edited.split()
+    matcher = difflib.SequenceMatcher(None, orig_words, edit_words, autojunk=False)
+
+    html = ""
+    for opcode, a0, a1, b0, b1 in matcher.get_opcodes():
+        if opcode == "equal":
+            html += esc(" ".join(edit_words[b0:b1])) + " "
+        elif opcode == "insert":
+            html += f'<span class="da">{esc(" ".join(edit_words[b0:b1]))}</span> '
+        elif opcode == "delete":
+            html += f'<span class="dd">{esc(" ".join(orig_words[a0:a1]))}</span> '
+        elif opcode == "replace":
+            html += (f'<span class="dd">{esc(" ".join(orig_words[a0:a1]))}</span>'
+                     f'<span class="da">{esc(" ".join(edit_words[b0:b1]))}</span> ')
+    return html.strip()
+
+
 def img_to_b64(pil_image: Image.Image, max_px: int = 2000, quality: int = 92) -> str:
     img = pil_image.copy()
     img.thumbnail((max_px, max_px), Image.LANCZOS)
@@ -156,7 +219,6 @@ def img_to_b64(pil_image: Image.Image, max_px: int = 2000, quality: int = 92) ->
 
 
 def run_ocr(image: Image.Image) -> str:
-    """Google Cloud Vision API — DOCUMENT_TEXT_DETECTION"""
     b64 = img_to_b64(image)
     resp = requests.post(
         f"https://vision.googleapis.com/v1/images:annotate?key={VISION_KEY}",
@@ -179,11 +241,10 @@ def run_ocr(image: Image.Image) -> str:
     return text
 
 
-def call_gemini(prompt: str) -> str:
-    """Gemini 호출 — 할당량 초과 시 자동 대기 후 1회 재시도"""
+def call_gemini(prompt: str, max_tokens: int = 2048) -> str:
     genai.configure(api_key=GEMINI_KEY)
     gm  = genai.GenerativeModel(GEMINI_MODEL)
-    cfg = genai.GenerationConfig(temperature=0.3, max_output_tokens=2048)
+    cfg = genai.GenerationConfig(temperature=0.3, max_output_tokens=max_tokens)
 
     for attempt in range(2):
         try:
@@ -221,10 +282,6 @@ def render_criteria(criteria: list):
         )
 
 
-def esc(s: str) -> str:
-    return s.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
-
-
 def build_txt() -> str:
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     crit = "\n".join(f"• [{c.get('label','')}] {c.get('issue','')}"
@@ -246,20 +303,25 @@ def build_html() -> str:
         f'{c.get("label","")}</span>{esc(c.get("issue",""))}</li>'
         for c in st.session_state.criteria
     ) or "<li>없음</li>"
+    diff_html = highlight_diff(st.session_state.orig_text, st.session_state.edited_text)
     css = ("body{font-family:-apple-system,sans-serif;max-width:700px;margin:40px auto;"
            "padding:20px;color:#111;line-height:1.9}"
            "h1{color:#4f46e5;border-bottom:2px solid #4f46e5;padding-bottom:8px}"
            ".date{color:#9ca3af;font-size:12px;margin-bottom:24px}"
            "h2{color:#374151;font-size:15px;margin:22px 0 10px}"
-           ".box{padding:16px;border-radius:12px;white-space:pre-wrap;font-size:14px;line-height:2}"
-           ".o{background:#f9fafb;border-left:3px solid #d1d5db;color:#6b7280}"
-           ".e{background:#eef2ff;border-left:3px solid #4f46e5}"
+           ".box{padding:16px;border-radius:12px;font-size:14px;line-height:2}"
+           ".o{background:#f9fafb;border-left:3px solid #d1d5db;color:#6b7280;white-space:pre-wrap}"
+           ".e{background:#eef2ff;border-left:3px solid #4f46e5;white-space:pre-wrap}"
+           ".d{background:#f9fafb;border-left:3px solid #4f46e5;line-height:2.4}"
            "ul{list-style:none;padding:0;display:flex;flex-direction:column;gap:8px}"
            "li{padding:10px 14px;background:#f3f4f6;border-radius:9px;font-size:13px}"
            ".tag{display:inline-block;padding:2px 9px;border-radius:20px;"
            "font-size:11px;font-weight:700;margin-right:7px}"
            ".grammar{background:#fef3c7;color:#92400e}.style{background:#dbeafe;color:#1e40af}"
-           ".logic{background:#d1fae5;color:#065f46}.flow{background:#ede9fe;color:#5b21b6}")
+           ".logic{background:#d1fae5;color:#065f46}.flow{background:#ede9fe;color:#5b21b6}"
+           ".da{background:#bbf7d0;color:#14532d;border-radius:4px;padding:1px 3px;font-weight:600}"
+           ".dd{background:#fecaca;color:#7f1d1d;border-radius:4px;padding:1px 3px;"
+           "text-decoration:line-through;opacity:.75}")
     return (f'<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8">'
             f'<meta name="viewport" content="width=device-width,initial-scale=1">'
             f'<title>글 첨삭 완성본</title><style>{css}</style></head><body>'
@@ -268,6 +330,11 @@ def build_html() -> str:
             f'<h2>📄 원문</h2><div class="box o">{esc(st.session_state.orig_text)}</div>'
             f'<h2>📋 첨삭 기준</h2><ul>{crit_html}</ul>'
             f'<h2>✨ 첨삭 완성본</h2><div class="box e">{esc(st.session_state.edited_text)}</div>'
+            f'<h2>🔍 변경 표시</h2>'
+            f'<p style="font-size:12px;color:#6b7280">'
+            f'<span class="da">초록</span> 추가/변경 &nbsp; '
+            f'<span class="dd">빨강</span> 삭제</p>'
+            f'<div class="box d">{diff_html}</div>'
             f'</body></html>')
 
 
@@ -278,7 +345,6 @@ def build_html() -> str:
 st.markdown("## ✍️ 글 첨삭 도우미 Pro")
 st.markdown("Google Vision OCR · Gemini AI 첨삭")
 
-# API 키 미설정 시 안내 배너
 if not KEYS_OK:
     st.markdown("""
 <div class="setup-box">
@@ -321,7 +387,7 @@ if uploaded:
             with st.spinner("Google Vision OCR 실행 중..."):
                 try:
                     text = run_ocr(image)
-                    st.session_state.ocr_text    = text
+                    st.session_state.ocr_text      = text
                     st.session_state.analysis_done = False
                     st.session_state.edited_text   = ""
                     st.session_state.criteria      = []
@@ -352,10 +418,37 @@ text_input = st.text_area(
 )
 
 if text_input.strip():
+    char_cnt = len(text_input.replace(" ", "").replace("\n", ""))
     c1, c2, c3 = st.columns(3)
-    c1.metric("글자수", f"{len(text_input.replace(' ','').replace(chr(10),'')):,}")
+    c1.metric("글자수", f"{char_cnt:,}")
     c2.metric("어절수", f"{len(text_input.split()):,}")
     c3.metric("문장수", max(len(re.findall(r'[.!?。]', text_input)), 1))
+
+    # ── 토큰 선택 ─────────────────────────────────────────────────
+    st.markdown("")
+    rec_tokens = recommend_tokens(text_input)
+    rec_label  = next(label for label, _, tok in TOKEN_OPTIONS if tok == rec_tokens)
+
+    tok_labels = [label for label, _, _ in TOKEN_OPTIONS]
+    tok_values = {label: tok for label, _, tok in TOKEN_OPTIONS}
+
+    sel_label = st.select_slider(
+        "📊 출력 토큰 설정",
+        options=tok_labels,
+        value=rec_label,
+        help="글자 수에 따라 자동 추천됩니다. 결과가 잘리면 더 크게 설정하세요.",
+    )
+    selected_tokens = tok_values[sel_label]
+    st.session_state.max_tokens = selected_tokens
+
+    # 안내 메시지
+    approx_chars = selected_tokens  # 한국어 기준 약 1토큰 ≈ 1자
+    st.markdown(
+        f'<div class="tok-info">✅ 현재 설정: <strong>{sel_label}</strong> '
+        f'— 첨삭 결과 약 <strong>{approx_chars:,}자</strong> 출력 가능 '
+        f'{"&nbsp;🤖 자동 추천" if selected_tokens == rec_tokens else ""}</div>',
+        unsafe_allow_html=True,
+    )
 
 if st.button(
     "🤖 AI 첨삭 시작하기 (Gemini)",
@@ -364,6 +457,7 @@ if st.button(
     disabled=len(text_input.strip()) < 5,
 ):
     st.session_state.orig_text = text_input.strip()
+    max_tok = st.session_state.max_tokens
 
     with st.spinner("(1/2) 첨삭 기준 분석 중..."):
         try:
@@ -382,7 +476,8 @@ if st.button(
 ]
 
 type: grammar(문법·맞춤법) / style(문체·표현) / logic(논리·내용) / flow(흐름·구성)
-- 실제 문제만 포함 (없으면 [])  - 최대 5개  - JSON만 출력"""
+- 실제 문제만 포함 (없으면 [])  - 최대 5개  - JSON만 출력""",
+                max_tokens=1024,   # 기준 분석은 항상 1024로 충분
             )
             cleaned = re.sub(r"```json?|```", "", crit_raw).strip()
             m = re.search(r"\[[\s\S]*\]", cleaned)
@@ -397,7 +492,7 @@ type: grammar(문법·맞춤법) / style(문체·표현) / logic(논리·내용)
             st.error(f"기준 분석 오류: {e}")
             st.stop()
 
-    with st.spinner("(2/2) 첨삭 완성본 작성 중..."):
+    with st.spinner(f"(2/2) 첨삭 완성본 작성 중... (출력 토큰: {max_tok:,})"):
         try:
             crit_str = ("\n".join(
                 f"- [{c.get('label','')}] {c.get('issue','')}"
@@ -421,7 +516,8 @@ type: grammar(문법·맞춤법) / style(문체·표현) / logic(논리·내용)
 3. 자연스러운 문체로 개선
 4. 논리적 흐름 강화
 5. 마지막 줄에 ===점수===숫자 형태로 원문 완성도 점수 표기 (예: ===점수===72)
-6. 첨삭된 글만 출력 (설명 없음, 마크다운 없음)"""
+6. 첨삭된 글만 출력 (설명 없음, 마크다운 없음)""",
+                max_tokens=max_tok,
             )
             score_m = re.search(r"===점수===(\d+)", edit_raw)
             st.session_state.score       = int(score_m.group(1)) if score_m else None
@@ -454,20 +550,38 @@ if st.session_state.analysis_done:
     with st.expander("📋 첨삭 기준", expanded=True):
         render_criteria(st.session_state.criteria)
 
-    tab_edit, tab_cmp = st.tabs(["✨ 첨삭본", "📄 원문 비교"])
+    tab_edit, tab_diff, tab_cmp = st.tabs(["✨ 첨삭본", "🔍 변경 표시", "📄 원문 비교"])
+
     with tab_edit:
-        st.markdown(f'<div class="result-box">{esc(st.session_state.edited_text)}</div>',
-                    unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="result-box">{esc(st.session_state.edited_text)}</div>',
+            unsafe_allow_html=True,
+        )
+
+    with tab_diff:
+        st.markdown(
+            '<p class="legend">'
+            '<span class="da">초록</span> 추가·변경된 부분 &nbsp;&nbsp; '
+            '<span class="dd">빨강 취소선</span> 삭제된 부분</p>',
+            unsafe_allow_html=True,
+        )
+        diff_html = highlight_diff(st.session_state.orig_text, st.session_state.edited_text)
+        st.markdown(f'<div class="diff-box">{diff_html}</div>', unsafe_allow_html=True)
+
     with tab_cmp:
         co, ce = st.columns(2)
         with co:
             st.markdown("**원문**")
-            st.markdown(f'<div class="orig-box">{esc(st.session_state.orig_text)}</div>',
-                        unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="orig-box">{esc(st.session_state.orig_text)}</div>',
+                unsafe_allow_html=True,
+            )
         with ce:
             st.markdown("**첨삭본**")
-            st.markdown(f'<div class="result-box">{esc(st.session_state.edited_text)}</div>',
-                        unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="result-box">{esc(st.session_state.edited_text)}</div>',
+                unsafe_allow_html=True,
+            )
 
     st.divider()
     st.markdown("**💾 저장**")
