@@ -28,7 +28,7 @@ from PIL import Image
 import google.generativeai as genai
 
 # ── 고정 상수 ─────────────────────────────────────────────────────
-GEMINI_MODEL = "gemini-3.5-flash"
+GEMINI_MODEL = "gemini-2.0-flash"
 
 # 토큰 옵션 — 마크업 오버헤드(~2배)를 감안하여 글자수 기준을 보수적으로 설정
 TOKEN_OPTIONS = [
@@ -591,38 +591,32 @@ if st.session_state.analysis_done:
     with st.expander("📋 첨삭 기준", expanded=True):
         render_criteria(st.session_state.criteria)
 
-    tab_markup, tab_edit, tab_cmp = st.tabs(["🔍 변경 표시", "✨ 첨삭본", "📄 원문 비교"])
+    tab_combined, tab_final, tab_orig = st.tabs(["✍️ 첨삭본", "✨ 완성본", "📄 원문"])
 
-    with tab_markup:
+    with tab_combined:
+        # 원문 + 수정 내용이 합쳐진 첨삭본
         st.markdown(
             '<div class="legend">'
             '<span class="del">빨강 취소선</span> 삭제된 원문 &nbsp;&nbsp;'
-            '<span class="ins">(초록 괄호)</span> 수정된 내용</div>',
+            '<span class="ins">(초록 괄호)</span> 수정된 내용 &nbsp;&nbsp;'
+            '그 외 = 변경 없는 원문</div>',
             unsafe_allow_html=True,
         )
         markup_html = render_markup(st.session_state.markup_text)
         st.markdown(f'<div class="markup-box">{markup_html}</div>', unsafe_allow_html=True)
 
-    with tab_edit:
+    with tab_final:
+        # 수정사항만 반영된 깔끔한 완성본
         st.markdown(
             f'<div class="result-box">{esc(st.session_state.edited_text)}</div>',
             unsafe_allow_html=True,
         )
 
-    with tab_cmp:
-        co, ce = st.columns(2)
-        with co:
-            st.markdown("**원문**")
-            st.markdown(
-                f'<div class="orig-box">{esc(st.session_state.orig_text)}</div>',
-                unsafe_allow_html=True,
-            )
-        with ce:
-            st.markdown("**첨삭본**")
-            st.markdown(
-                f'<div class="result-box">{esc(st.session_state.edited_text)}</div>',
-                unsafe_allow_html=True,
-            )
+    with tab_orig:
+        st.markdown(
+            f'<div class="orig-box">{esc(st.session_state.orig_text)}</div>',
+            unsafe_allow_html=True,
+        )
 
     st.divider()
     st.markdown("**💾 저장**")
