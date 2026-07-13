@@ -19,6 +19,7 @@ import io
 import json
 import time
 import base64
+import difflib
 from datetime import datetime
 
 import streamlit as st
@@ -27,7 +28,15 @@ from PIL import Image
 import google.generativeai as genai
 
 # ── 고정 상수 ─────────────────────────────────────────────────────
-GEMINI_MODEL = "gemini-3.5-flash"   # 사용 모델
+GEMINI_MODEL = "gemini-2.0-flash"
+
+# 토큰 옵션 — 마크업 오버헤드(~2배)를 감안하여 글자수 기준을 보수적으로 설정
+TOKEN_OPTIONS = [
+    ("소형 · 2,048 토큰",  300,   2048),
+    ("중형 · 4,096 토큰",  800,   4096),
+    ("대형 · 8,192 토큰",  2000,  8192),
+    ("특대 · 16,384 토큰", 99999, 16384),
+]
 
 # ── 페이지 설정 ────────────────────────────────────────────────────
 st.set_page_config(
@@ -45,8 +54,14 @@ st.markdown("""
 .result-box {
     background: #eef2ff; border-left: 4px solid #4f46e5;
     border-radius: 12px; padding: 18px 20px;
-    line-height: 2.1; white-space: pre-wrap;
-    font-size: 14px; color: #111827; margin-bottom: 4px;
+    line-height: 2.1; font-size: 14px; color: #111827; margin-bottom: 4px;
+    white-space: pre-wrap; word-break: break-word;
+}
+.markup-box {
+    background: #f9fafb; border-left: 4px solid #4f46e5;
+    border-radius: 12px; padding: 18px 20px;
+    line-height: 2.6; font-size: 14px; color: #111827; margin-bottom: 4px;
+    word-break: break-word;
 }
 .orig-box {
     background: #f9fafb; border-left: 4px solid #d1d5db;
@@ -54,6 +69,20 @@ st.markdown("""
     line-height: 2.1; white-space: pre-wrap;
     font-size: 14px; color: #6b7280;
 }
+
+/* 첨삭 마크업 */
+.del {
+    background: #fee2e2; color: #991b1b;
+    text-decoration: line-through;
+    border-radius: 4px; padding: 1px 4px;
+    font-size: 13px;
+}
+.ins {
+    background: #dcfce7; color: #166534;
+    border-radius: 4px; padding: 1px 6px;
+    font-weight: 600; font-size: 13px;
+}
+
 .c-item {
     background: #f3f4f6; border-radius: 10px;
     padding: 11px 15px; margin-bottom: 8px;
@@ -78,6 +107,15 @@ st.markdown("""
     font-size: 13px; font-weight: 800;
     margin-right: 8px; vertical-align: middle;
 }
+.tok-info {
+    background: #f0f9ff; border: 1px solid #bae6fd;
+    border-radius: 10px; padding: 10px 14px;
+    font-size: 12px; color: #0369a1; margin-bottom: 8px;
+}
+.legend {
+    font-size: 12px; color: #6b7280;
+    margin-bottom: 10px; line-height: 2;
+}
 .setup-box {
     background: #fefce8; border: 1px solid #fde047;
     border-radius: 12px; padding: 20px 22px;
@@ -91,9 +129,8 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# ── API 키 로드 (소스코드에 키 없음) ─────────────────────────────
+# ── API 키 로드 ───────────────────────────────────────────────────
 def _load_key(name: str) -> str:
-    """st.secrets → 환경변수 순서로 로드. 없으면 빈 문자열."""
     try:
         val = st.secrets[name]
         if val:
@@ -111,17 +148,19 @@ KEYS_OK    = bool(VISION_KEY) and bool(GEMINI_KEY)
 _defaults = {
     "ocr_text":      "",
     "orig_text":     "",
-    "edited_text":   "",
+    "markup_text":   "",   # ~~삭제~~(수정) 마크업 포함 원본 출력
+    "edited_text":   "",   # 마크업 제거한 깔끔한 첨삭본
     "criteria":      [],
     "score":         None,
     "analysis_done": False,
+    "max_tokens":    4096,
 }
 for k, v in _defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
 
-# ── 사이드바 (키 입력 없음 — 상태 표시만) ────────────────────────
+# ── 사이드바 ──────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## ✍️ 글 첨삭 도우미 Pro")
     st.caption("Google Vision OCR · Gemini AI")
@@ -145,6 +184,58 @@ with st.sidebar:
 
 
 # ── 유틸 함수 ─────────────────────────────────────────────────────
+def esc(s: str) -> str:
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def recommend_tokens(text: str) -> int:
+    """글자 수 기준으로 권장 토큰 반환 (마크업 오버헤드 2배 감안)."""
+    char_cnt = len(text.replace(" ", "").replace("\n", ""))
+    for _, limit, tokens in TOKEN_OPTIONS:
+        if char_cnt <= limit:
+            return tokens
+    return TOKEN_OPTIONS[-1][2]
+
+
+def render_markup(text: str) -> str:
+    """
+    Gemini 출력의 ~~삭제~~(수정) 마크업을 컬러 HTML로 변환.
+    패턴:
+      ~~원문~~(수정본) → 빨강 취소선 + 초록 괄호 수정
+      ~~원문~~         → 빨강 취소선 (삭제)
+    """
+    result = ""
+    # 패턴 1: ~~del~~(ins)  |  패턴 2: ~~del~~
+    pattern = re.compile(r'~~(.*?)~~\(([^)]*)\)|~~(.*?)~~', re.DOTALL)
+    last = 0
+    for m in pattern.finditer(text):
+        # 매치 전 일반 텍스트 (줄바꿈 보존)
+        before = esc(text[last:m.start()]).replace("\n", "<br>")
+        result += before
+
+        if m.group(1) is not None:
+            # ~~del~~(ins)
+            result += (f'<span class="del">{esc(m.group(1))}</span>'
+                       f'<span class="ins">({esc(m.group(2))})</span>')
+        else:
+            # ~~del~~ only
+            result += f'<span class="del">{esc(m.group(3))}</span>'
+
+        last = m.end()
+
+    result += esc(text[last:]).replace("\n", "<br>")
+    return result
+
+
+def strip_markup(text: str) -> str:
+    """마크업 제거 → 깔끔한 첨삭본 생성."""
+    # ~~del~~(ins) → ins
+    text = re.sub(r'~~.*?~~\(([^)]*)\)', r'\1', text, flags=re.DOTALL)
+    # ~~del~~ → (삭제)
+    text = re.sub(r'~~.*?~~', '', text, flags=re.DOTALL)
+    return text.strip()
+
+
 def img_to_b64(pil_image: Image.Image, max_px: int = 2000, quality: int = 92) -> str:
     img = pil_image.copy()
     img.thumbnail((max_px, max_px), Image.LANCZOS)
@@ -156,7 +247,6 @@ def img_to_b64(pil_image: Image.Image, max_px: int = 2000, quality: int = 92) ->
 
 
 def run_ocr(image: Image.Image) -> str:
-    """Google Cloud Vision API — DOCUMENT_TEXT_DETECTION"""
     b64 = img_to_b64(image)
     resp = requests.post(
         f"https://vision.googleapis.com/v1/images:annotate?key={VISION_KEY}",
@@ -179,11 +269,10 @@ def run_ocr(image: Image.Image) -> str:
     return text
 
 
-def call_gemini(prompt: str) -> str:
-    """Gemini 호출 — 할당량 초과 시 자동 대기 후 1회 재시도"""
+def call_gemini(prompt: str, max_tokens: int = 2048) -> str:
     genai.configure(api_key=GEMINI_KEY)
     gm  = genai.GenerativeModel(GEMINI_MODEL)
-    cfg = genai.GenerationConfig(temperature=0.3, max_output_tokens=2048)
+    cfg = genai.GenerationConfig(temperature=0.3, max_output_tokens=max_tokens)
 
     for attempt in range(2):
         try:
@@ -221,10 +310,6 @@ def render_criteria(criteria: list):
         )
 
 
-def esc(s: str) -> str:
-    return s.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
-
-
 def build_txt() -> str:
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     crit = "\n".join(f"• [{c.get('label','')}] {c.get('issue','')}"
@@ -234,6 +319,7 @@ def build_txt() -> str:
         f"작성일: {now}", "─"*40, "",
         "[원문]", st.session_state.orig_text, "", "─"*40, "",
         "[첨삭 기준]", crit, "", "─"*40, "",
+        "[변경 표시 (~~삭제~~(수정) 형식)]", st.session_state.markup_text, "", "─"*40, "",
         "[첨삭 완성본]", st.session_state.edited_text, "",
     ])
 
@@ -246,20 +332,27 @@ def build_html() -> str:
         f'{c.get("label","")}</span>{esc(c.get("issue",""))}</li>'
         for c in st.session_state.criteria
     ) or "<li>없음</li>"
+    markup_html = render_markup(st.session_state.markup_text)
     css = ("body{font-family:-apple-system,sans-serif;max-width:700px;margin:40px auto;"
            "padding:20px;color:#111;line-height:1.9}"
            "h1{color:#4f46e5;border-bottom:2px solid #4f46e5;padding-bottom:8px}"
            ".date{color:#9ca3af;font-size:12px;margin-bottom:24px}"
            "h2{color:#374151;font-size:15px;margin:22px 0 10px}"
-           ".box{padding:16px;border-radius:12px;white-space:pre-wrap;font-size:14px;line-height:2}"
-           ".o{background:#f9fafb;border-left:3px solid #d1d5db;color:#6b7280}"
-           ".e{background:#eef2ff;border-left:3px solid #4f46e5}"
+           ".box{padding:16px;border-radius:12px;font-size:14px;line-height:2}"
+           ".o{background:#f9fafb;border-left:3px solid #d1d5db;color:#6b7280;white-space:pre-wrap}"
+           ".e{background:#eef2ff;border-left:3px solid #4f46e5;white-space:pre-wrap}"
+           ".m{background:#f9fafb;border-left:3px solid #4f46e5;line-height:2.6;word-break:break-word}"
            "ul{list-style:none;padding:0;display:flex;flex-direction:column;gap:8px}"
            "li{padding:10px 14px;background:#f3f4f6;border-radius:9px;font-size:13px}"
            ".tag{display:inline-block;padding:2px 9px;border-radius:20px;"
            "font-size:11px;font-weight:700;margin-right:7px}"
            ".grammar{background:#fef3c7;color:#92400e}.style{background:#dbeafe;color:#1e40af}"
-           ".logic{background:#d1fae5;color:#065f46}.flow{background:#ede9fe;color:#5b21b6}")
+           ".logic{background:#d1fae5;color:#065f46}.flow{background:#ede9fe;color:#5b21b6}"
+           ".del{background:#fee2e2;color:#991b1b;text-decoration:line-through;"
+           "border-radius:4px;padding:1px 4px;font-size:13px}"
+           ".ins{background:#dcfce7;color:#166534;border-radius:4px;"
+           "padding:1px 6px;font-weight:600;font-size:13px}"
+           ".legend{font-size:12px;color:#6b7280;margin-bottom:10px}")
     return (f'<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8">'
             f'<meta name="viewport" content="width=device-width,initial-scale=1">'
             f'<title>글 첨삭 완성본</title><style>{css}</style></head><body>'
@@ -267,7 +360,13 @@ def build_html() -> str:
             f'<p class="date">작성일: {now} | Google Vision + Gemini</p>'
             f'<h2>📄 원문</h2><div class="box o">{esc(st.session_state.orig_text)}</div>'
             f'<h2>📋 첨삭 기준</h2><ul>{crit_html}</ul>'
-            f'<h2>✨ 첨삭 완성본</h2><div class="box e">{esc(st.session_state.edited_text)}</div>'
+            f'<h2>🔍 변경 표시</h2>'
+            f'<p class="legend">'
+            f'<span class="del">취소선</span> 삭제된 원문 &nbsp;'
+            f'<span class="ins">(괄호)</span> 수정된 내용</p>'
+            f'<div class="box m">{markup_html}</div>'
+            f'<h2>✨ 첨삭 완성본</h2>'
+            f'<div class="box e">{esc(st.session_state.edited_text)}</div>'
             f'</body></html>')
 
 
@@ -278,7 +377,6 @@ def build_html() -> str:
 st.markdown("## ✍️ 글 첨삭 도우미 Pro")
 st.markdown("Google Vision OCR · Gemini AI 첨삭")
 
-# API 키 미설정 시 안내 배너
 if not KEYS_OK:
     st.markdown("""
 <div class="setup-box">
@@ -321,8 +419,9 @@ if uploaded:
             with st.spinner("Google Vision OCR 실행 중..."):
                 try:
                     text = run_ocr(image)
-                    st.session_state.ocr_text    = text
+                    st.session_state.ocr_text      = text
                     st.session_state.analysis_done = False
+                    st.session_state.markup_text   = ""
                     st.session_state.edited_text   = ""
                     st.session_state.criteria      = []
                     st.session_state.score         = None
@@ -352,10 +451,35 @@ text_input = st.text_area(
 )
 
 if text_input.strip():
+    char_cnt = len(text_input.replace(" ", "").replace("\n", ""))
     c1, c2, c3 = st.columns(3)
-    c1.metric("글자수", f"{len(text_input.replace(' ','').replace(chr(10),'')):,}")
+    c1.metric("글자수", f"{char_cnt:,}")
     c2.metric("어절수", f"{len(text_input.split()):,}")
     c3.metric("문장수", max(len(re.findall(r'[.!?。]', text_input)), 1))
+
+    # ── 토큰 선택 ─────────────────────────────────────────────────
+    st.markdown("")
+    rec_tokens = recommend_tokens(text_input)
+    rec_label  = next(label for label, _, tok in TOKEN_OPTIONS if tok == rec_tokens)
+    tok_labels = [label for label, _, _ in TOKEN_OPTIONS]
+    tok_values = {label: tok for label, _, tok in TOKEN_OPTIONS}
+
+    sel_label = st.select_slider(
+        "📊 출력 토큰 설정",
+        options=tok_labels,
+        value=rec_label,
+        help="첨삭 마크업 포함 출력을 감안해 자동 추천합니다. 결과가 잘리면 한 단계 올려주세요.",
+    )
+    selected_tokens = tok_values[sel_label]
+    st.session_state.max_tokens = selected_tokens
+
+    approx_chars = selected_tokens
+    st.markdown(
+        f'<div class="tok-info">✅ 현재 설정: <strong>{sel_label}</strong> '
+        f'— 출력 약 <strong>{approx_chars:,}자</strong> 가능 '
+        f'{"&nbsp;🤖 자동 추천" if selected_tokens == rec_tokens else ""}</div>',
+        unsafe_allow_html=True,
+    )
 
 if st.button(
     "🤖 AI 첨삭 시작하기 (Gemini)",
@@ -364,7 +488,9 @@ if st.button(
     disabled=len(text_input.strip()) < 5,
 ):
     st.session_state.orig_text = text_input.strip()
+    max_tok = st.session_state.max_tokens
 
+    # 1단계 — 첨삭 기준 분석
     with st.spinner("(1/2) 첨삭 기준 분석 중..."):
         try:
             crit_raw = call_gemini(
@@ -382,7 +508,8 @@ if st.button(
 ]
 
 type: grammar(문법·맞춤법) / style(문체·표현) / logic(논리·내용) / flow(흐름·구성)
-- 실제 문제만 포함 (없으면 [])  - 최대 5개  - JSON만 출력"""
+- 실제 문제만 포함 (없으면 [])  - 최대 5개  - JSON만 출력""",
+                max_tokens=1024,
             )
             cleaned = re.sub(r"```json?|```", "", crit_raw).strip()
             m = re.search(r"\[[\s\S]*\]", cleaned)
@@ -397,7 +524,8 @@ type: grammar(문법·맞춤법) / style(문체·표현) / logic(논리·내용)
             st.error(f"기준 분석 오류: {e}")
             st.stop()
 
-    with st.spinner("(2/2) 첨삭 완성본 작성 중..."):
+    # 2단계 — 전체 첨삭 (마크업 포함)
+    with st.spinner(f"(2/2) 전체 첨삭 중... (출력 토큰: {max_tok:,})"):
         try:
             crit_str = ("\n".join(
                 f"- [{c.get('label','')}] {c.get('issue','')}"
@@ -405,27 +533,36 @@ type: grammar(문법·맞춤법) / style(문체·표현) / logic(논리·내용)
             ) or "- 전반적으로 자연스럽고 완성도 높게 개선")
 
             edit_raw = call_gemini(
-                f"""전문 글쓰기 첨삭 선생님으로서 아래 글을 첨삭해주세요.
+                f"""당신은 전문 글쓰기 첨삭 선생님입니다.
+아래 글을 처음 문장부터 마지막 문장까지 단 한 줄도 빠짐없이 전부 첨삭하세요.
 
-원문:
+【원문】
 \"\"\"
 {st.session_state.orig_text}
 \"\"\"
 
-첨삭 기준:
+【첨삭 기준】
 {crit_str}
 
-규칙:
-1. 원문의 핵심 내용과 의도 유지
-2. 문법·맞춤법 오류 수정
-3. 자연스러운 문체로 개선
-4. 논리적 흐름 강화
-5. 마지막 줄에 ===점수===숫자 형태로 원문 완성도 점수 표기 (예: ===점수===72)
-6. 첨삭된 글만 출력 (설명 없음, 마크다운 없음)"""
+【출력 규칙 — 반드시 준수】
+1. 원문 전체를 순서대로 처음부터 끝까지 모두 출력하세요.
+2. 수정한 부분은 아래 형식으로 표기하세요:
+   - 교체: ~~원래 표현~~(수정된 표현)
+   - 삭제: ~~삭제할 내용~~
+   - 추가: 새 내용을 그냥 삽입 (표기 없음)
+3. 수정이 없는 부분은 그대로 출력하세요.
+4. 모든 문단을 빠짐없이 처리하고, 도중에 멈추지 마세요.
+5. 마지막 줄에 ===점수===숫자 (예: ===점수===72) 를 추가하세요.
+6. 마크업과 글 내용 외에 설명·제목·머리말은 일절 출력하지 마세요.""",
+                max_tokens=max_tok,
             )
+
             score_m = re.search(r"===점수===(\d+)", edit_raw)
+            raw_clean = re.sub(r"===점수===\d+", "", edit_raw).strip()
+
             st.session_state.score       = int(score_m.group(1)) if score_m else None
-            st.session_state.edited_text = re.sub(r"===점수===\d+", "", edit_raw).strip()
+            st.session_state.markup_text = raw_clean
+            st.session_state.edited_text = strip_markup(raw_clean)
             st.session_state.analysis_done = True
         except Exception as e:
             st.error(f"첨삭 오류: {e}")
@@ -454,20 +591,38 @@ if st.session_state.analysis_done:
     with st.expander("📋 첨삭 기준", expanded=True):
         render_criteria(st.session_state.criteria)
 
-    tab_edit, tab_cmp = st.tabs(["✨ 첨삭본", "📄 원문 비교"])
+    tab_markup, tab_edit, tab_cmp = st.tabs(["🔍 변경 표시", "✨ 첨삭본", "📄 원문 비교"])
+
+    with tab_markup:
+        st.markdown(
+            '<div class="legend">'
+            '<span class="del">빨강 취소선</span> 삭제된 원문 &nbsp;&nbsp;'
+            '<span class="ins">(초록 괄호)</span> 수정된 내용</div>',
+            unsafe_allow_html=True,
+        )
+        markup_html = render_markup(st.session_state.markup_text)
+        st.markdown(f'<div class="markup-box">{markup_html}</div>', unsafe_allow_html=True)
+
     with tab_edit:
-        st.markdown(f'<div class="result-box">{esc(st.session_state.edited_text)}</div>',
-                    unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="result-box">{esc(st.session_state.edited_text)}</div>',
+            unsafe_allow_html=True,
+        )
+
     with tab_cmp:
         co, ce = st.columns(2)
         with co:
             st.markdown("**원문**")
-            st.markdown(f'<div class="orig-box">{esc(st.session_state.orig_text)}</div>',
-                        unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="orig-box">{esc(st.session_state.orig_text)}</div>',
+                unsafe_allow_html=True,
+            )
         with ce:
             st.markdown("**첨삭본**")
-            st.markdown(f'<div class="result-box">{esc(st.session_state.edited_text)}</div>',
-                        unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="result-box">{esc(st.session_state.edited_text)}</div>',
+                unsafe_allow_html=True,
+            )
 
     st.divider()
     st.markdown("**💾 저장**")
