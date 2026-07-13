@@ -29,7 +29,7 @@ from PIL import Image
 import google.generativeai as genai
 
 # ── 고정 상수 ─────────────────────────────────────────────────────
-GEMINI_MODEL = "gemini-3.1-flash-lite"
+GEMINI_MODEL = "gemini-2.0-flash"
 
 # 토큰 옵션 — 변경사항 JSON만 출력하므로 기존 대비 1/5 수준으로 충분
 TOKEN_OPTIONS = [
@@ -338,17 +338,26 @@ def call_gemini(prompt: str, max_tokens: int = 2048, timeout: int = 90) -> str:
 
 
 def render_criteria(criteria: list, lang: str = "ko"):
-    tag_map = {
-        # 한국어
-        "grammar":    ("맞춤법·문법", "tag-grammar"),
-        "structure":  ("문장 구조",   "tag-structure"),
-        "vocabulary": ("어휘·표현",   "tag-vocabulary"),
-        "logic":      ("논리·흐름",   "tag-logic"),
-        "theme":      ("주제 일관성", "tag-theme"),
-        # 영어
-        "cohesion":   ("Cohesion",    "tag-cohesion"),
-        "thesis":     ("Thesis",      "tag-thesis"),
-    }
+    if lang == "en":
+        tag_map = {
+            "grammar":    ("Grammar",            "tag-grammar"),
+            "structure":  ("Sentence Structure", "tag-structure"),
+            "vocabulary": ("Vocabulary",         "tag-vocabulary"),
+            "logic":      ("Logic & Flow",       "tag-logic"),
+            "theme":      ("Theme",              "tag-theme"),
+            "cohesion":   ("Cohesion",           "tag-cohesion"),
+            "thesis":     ("Thesis",             "tag-thesis"),
+        }
+    else:
+        tag_map = {
+            "grammar":    ("맞춤법·문법", "tag-grammar"),
+            "structure":  ("문장 구조",   "tag-structure"),
+            "vocabulary": ("어휘·표현",   "tag-vocabulary"),
+            "logic":      ("논리·흐름",   "tag-logic"),
+            "theme":      ("주제 일관성", "tag-theme"),
+            "cohesion":   ("Cohesion",    "tag-cohesion"),
+            "thesis":     ("Thesis",      "tag-thesis"),
+        }
     if not criteria:
         msg = "✅ No major issues found." if lang == "en" else "✅ 큰 문제가 없습니다."
         st.success(msg)
