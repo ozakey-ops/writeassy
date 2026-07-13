@@ -27,7 +27,7 @@ from PIL import Image
 import google.generativeai as genai
 
 # ── 고정 상수 ─────────────────────────────────────────────────────
-GEMINI_MODEL = "Gemini Robotics ER 1.5 Preview"   # 사용 모델
+GEMINI_MODEL = "Gemini Robotics ER 1.6 Preview"   # 사용 모델
 
 # ── 페이지 설정 ────────────────────────────────────────────────────
 st.set_page_config(
