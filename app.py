@@ -27,8 +27,7 @@ from PIL import Image
 import google.generativeai as genai
 
 # ── 고정 상수 ─────────────────────────────────────────────────────
-
-GEMINI_MODEL = "​gemini-2.5-flash"   # 사용 모델
+GEMINI_MODEL = "gemini-robotics-er-1.6-preview"   # 사용 모델
 
 # ── 페이지 설정 ────────────────────────────────────────────────────
 st.set_page_config(
