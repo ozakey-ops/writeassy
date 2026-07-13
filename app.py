@@ -20,6 +20,7 @@ import json
 import time
 import base64
 import difflib
+import concurrent.futures
 from datetime import datetime
 
 import streamlit as st
@@ -28,14 +29,13 @@ from PIL import Image
 import google.generativeai as genai
 
 # ── 고정 상수 ─────────────────────────────────────────────────────
-GEMINI_MODEL = "gemini-3.5-flash"
+GEMINI_MODEL = "gemini-2.0-flash"
 
-# 토큰 옵션 — 마크업 오버헤드(~2배)를 감안하여 글자수 기준을 보수적으로 설정
+# 토큰 옵션 — 변경사항 JSON만 출력하므로 기존 대비 1/5 수준으로 충분
 TOKEN_OPTIONS = [
-    ("소형 · 2,048 토큰",  300,   2048),
-    ("중형 · 4,096 토큰",  800,   4096),
-    ("대형 · 8,192 토큰",  2000,  8192),
-    ("특대 · 16,384 토큰", 99999, 16384),
+    ("절약 · 512 토큰",   500,   512),
+    ("보통 · 1,024 토큰", 2000,  1024),
+    ("여유 · 2,048 토큰", 99999, 2048),
 ]
 
 # ── 페이지 설정 ────────────────────────────────────────────────────
@@ -153,7 +153,7 @@ _defaults = {
     "criteria":      [],
     "score":         None,
     "analysis_done": False,
-    "max_tokens":    4096,
+    "max_tokens":    1024,
 }
 for k, v in _defaults.items():
     if k not in st.session_state:
@@ -227,13 +227,39 @@ def render_markup(text: str) -> str:
     return result
 
 
-def strip_markup(text: str) -> str:
-    """마크업 제거 → 깔끔한 첨삭본 생성."""
-    # ~~del~~(ins) → ins
-    text = re.sub(r'~~.*?~~\(([^)]*)\)', r'\1', text, flags=re.DOTALL)
-    # ~~del~~ → (삭제)
-    text = re.sub(r'~~.*?~~', '', text, flags=re.DOTALL)
-    return text.strip()
+def apply_changes(orig_text: str, changes: list) -> tuple:
+    """
+    Gemini의 변경 목록을 원문에 적용해 markup_text, edited_text 생성.
+    changes: [{"orig": "원래 구절", "new": "수정 구절"}, ...]
+    """
+    # 원문에서 각 변경 위치 탐색 후 위치순 정렬
+    positioned = []
+    for ch in changes:
+        orig = ch.get("orig", "").strip()
+        new  = ch.get("new",  "").strip()
+        if orig and orig in orig_text:
+            positioned.append((orig_text.find(orig), len(orig), orig, new))
+    positioned.sort(key=lambda x: x[0])
+
+    markup_parts, clean_parts = [], []
+    cursor = 0
+    for pos, length, orig, new in positioned:
+        if pos < cursor:          # 겹치는 변경은 건너뜀
+            continue
+        # 변경 전 그대로인 부분
+        markup_parts.append(orig_text[cursor:pos])
+        clean_parts.append(orig_text[cursor:pos])
+        # 변경 부분
+        if new:
+            markup_parts.append(f"~~{orig}~~({new})")
+            clean_parts.append(new)
+        else:                     # 삭제
+            markup_parts.append(f"~~{orig}~~")
+        cursor = pos + length
+
+    markup_parts.append(orig_text[cursor:])
+    clean_parts.append(orig_text[cursor:])
+    return "".join(markup_parts), "".join(clean_parts)
 
 
 def img_to_b64(pil_image: Image.Image, max_px: int = 2000, quality: int = 92) -> str:
@@ -269,14 +295,28 @@ def run_ocr(image: Image.Image) -> str:
     return text
 
 
-def call_gemini(prompt: str, max_tokens: int = 2048) -> str:
+def call_gemini(prompt: str, max_tokens: int = 2048, timeout: int = 90) -> str:
+    """Gemini 호출. timeout 초 안에 응답 없으면 TimeoutError 발생."""
     genai.configure(api_key=GEMINI_KEY)
     gm  = genai.GenerativeModel(GEMINI_MODEL)
     cfg = genai.GenerationConfig(temperature=0.3, max_output_tokens=max_tokens)
 
+    def _call():
+        return gm.generate_content(prompt, generation_config=cfg).text
+
     for attempt in range(2):
         try:
-            return gm.generate_content(prompt, generation_config=cfg).text
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                future = ex.submit(_call)
+                try:
+                    return future.result(timeout=timeout)
+                except concurrent.futures.TimeoutError:
+                    raise RuntimeError(
+                        f"⏱️ Gemini 응답 시간 초과 ({timeout}초).\n"
+                        "네트워크 상태를 확인하거나 잠시 후 다시 시도해주세요."
+                    )
+        except RuntimeError:
+            raise
         except Exception as e:
             msg = str(e)
             is_quota = any(k in msg for k in ("quota", "429", "RESOURCE_EXHAUSTED"))
@@ -490,82 +530,61 @@ if st.button(
     st.session_state.orig_text = text_input.strip()
     max_tok = st.session_state.max_tokens
 
-    # 1단계 — 첨삭 기준 분석
-    with st.spinner("(1/2) 첨삭 기준 분석 중..."):
+    # API 1회 호출 — 기준 분석 + 변경사항 동시 출력
+    with st.spinner("AI 첨삭 중... (최대 90초)"):
         try:
-            crit_raw = call_gemini(
-                f"""아래 글의 문제점을 분석하여 첨삭 기준을 JSON 배열로만 출력하세요.
-
-글:
-\"\"\"
-{st.session_state.orig_text}
-\"\"\"
-
-출력 형식 (순수 JSON만, 코드블록 없이):
-[
-  {{"type":"grammar","label":"문법/맞춤법","issue":"구체적인 문제 설명"}},
-  {{"type":"style","label":"문체/표현","issue":"구체적인 문제 설명"}}
-]
-
-type: grammar(문법·맞춤법) / style(문체·표현) / logic(논리·내용) / flow(흐름·구성)
-- 실제 문제만 포함 (없으면 [])  - 최대 5개  - JSON만 출력""",
-                max_tokens=1024,
-            )
-            cleaned = re.sub(r"```json?|```", "", crit_raw).strip()
-            m = re.search(r"\[[\s\S]*\]", cleaned)
-            criteria = []
-            if m:
-                try:
-                    criteria = json.loads(m.group())
-                except json.JSONDecodeError:
-                    pass
-            st.session_state.criteria = criteria
-        except Exception as e:
-            st.error(f"기준 분석 오류: {e}")
-            st.stop()
-
-    # 2단계 — 전체 첨삭 (마크업 포함)
-    with st.spinner(f"(2/2) 전체 첨삭 중... (출력 토큰: {max_tok:,})"):
-        try:
-            crit_str = ("\n".join(
-                f"- [{c.get('label','')}] {c.get('issue','')}"
-                for c in st.session_state.criteria
-            ) or "- 전반적으로 자연스럽고 완성도 높게 개선")
-
-            edit_raw = call_gemini(
+            raw = call_gemini(
                 f"""당신은 전문 글쓰기 첨삭 선생님입니다.
-아래 글을 처음 문장부터 마지막 문장까지 단 한 줄도 빠짐없이 전부 첨삭하세요.
+아래 글을 분석하고 첨삭하여 JSON 형식으로만 출력하세요.
 
 【원문】
 \"\"\"
 {st.session_state.orig_text}
 \"\"\"
 
-【첨삭 기준】
-{crit_str}
+【출력 형식 — 순수 JSON만, 코드블록 없이】
+{{
+  "score": 원문_완성도_점수(0~100 정수),
+  "criteria": [
+    {{"type":"grammar","label":"문법/맞춤법","issue":"설명"}},
+    {{"type":"style","label":"문체/표현","issue":"설명"}}
+  ],
+  "changes": [
+    {{"orig":"원문에서 수정할 정확한 구절","new":"수정된 구절"}},
+    {{"orig":"삭제할 구절","new":""}}
+  ]
+}}
 
-【출력 규칙 — 반드시 준수】
-1. 원문 전체를 순서대로 처음부터 끝까지 모두 출력하세요.
-2. 수정한 부분은 아래 형식으로 표기하세요:
-   - 교체: ~~원래 표현~~(수정된 표현)
-   - 삭제: ~~삭제할 내용~~
-   - 추가: 새 내용을 그냥 삽입 (표기 없음)
-3. 수정이 없는 부분은 그대로 출력하세요.
-4. 모든 문단을 빠짐없이 처리하고, 도중에 멈추지 마세요.
-5. 마지막 줄에 ===점수===숫자 (예: ===점수===72) 를 추가하세요.
-6. 마크업과 글 내용 외에 설명·제목·머리말은 일절 출력하지 마세요.""",
+【규칙】
+- type: grammar / style / logic / flow
+- criteria: 실제 문제만, 최대 5개 (없으면 [])
+- changes: 원문 처음부터 끝까지 빠짐없이 검토, 수정 필요한 모든 부분 포함
+- "orig"는 원문에 실제로 존재하는 문자열을 정확히 복사
+- 순수 JSON만 출력 (설명·코드블록 없음)""",
                 max_tokens=max_tok,
             )
 
-            score_m = re.search(r"===점수===(\d+)", edit_raw)
-            raw_clean = re.sub(r"===점수===\d+", "", edit_raw).strip()
+            cleaned = re.sub(r"```json?|```", "", raw).strip()
+            m = re.search(r"\{[\s\S]*\}", cleaned)
+            if not m:
+                raise RuntimeError("JSON 파싱 실패 — 응답을 확인해주세요.")
+            data = json.loads(m.group())
 
-            st.session_state.score       = int(score_m.group(1)) if score_m else None
-            st.session_state.markup_text = raw_clean
-            st.session_state.edited_text = strip_markup(raw_clean)
+            st.session_state.score    = data.get("score")
+            st.session_state.criteria = data.get("criteria", [])
+            changes = data.get("changes", [])
+
+            markup, clean = apply_changes(st.session_state.orig_text, changes)
+            st.session_state.markup_text   = markup
+            st.session_state.edited_text   = clean
             st.session_state.analysis_done = True
+
+        except json.JSONDecodeError as e:
+            st.error(f"JSON 파싱 오류: {e}\n\n원문 응답:\n{raw[:300]}")
+            st.stop()
         except Exception as e:
             st.error(f"첨삭 오류: {e}")
+            st.caption("💡 API 키가 올바른지, 네트워크가 연결되어 있는지 확인해주세요.")
             st.stop()
 
     st.rerun()
