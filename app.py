@@ -28,7 +28,7 @@ from PIL import Image
 import google.generativeai as genai
 
 # ── 고정 상수 ─────────────────────────────────────────────────────
-GEMINI_MODEL = "gemini-2.0-flash"
+GEMINI_MODEL = "gemini-3.5-flash"
 
 # 토큰 옵션 — 마크업 오버헤드(~2배)를 감안하여 글자수 기준을 보수적으로 설정
 TOKEN_OPTIONS = [
