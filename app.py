@@ -29,7 +29,7 @@ from PIL import Image
 import google.generativeai as genai
 
 # ── 고정 상수 ─────────────────────────────────────────────────────
-GEMINI_MODEL = "gemini-3.1-flash-lite"
+GEMINI_MODEL = "gemini-2.0-flash"
 
 # 토큰 옵션 — 변경사항 JSON만 출력하므로 기존 대비 1/5 수준으로 충분
 TOKEN_OPTIONS = [
@@ -92,10 +92,15 @@ st.markdown("""
     display: inline-block; padding: 2px 10px; border-radius: 20px;
     font-size: 11px; font-weight: 700; margin-right: 8px;
 }
-.tag-grammar { background: #fef3c7; color: #92400e; }
-.tag-style   { background: #dbeafe; color: #1e40af; }
-.tag-logic   { background: #d1fae5; color: #065f46; }
-.tag-flow    { background: #ede9fe; color: #5b21b6; }
+/* 한국어 기준 */
+.tag-grammar    { background: #fef3c7; color: #92400e; }
+.tag-structure  { background: #dbeafe; color: #1e40af; }
+.tag-vocabulary { background: #d1fae5; color: #065f46; }
+.tag-logic      { background: #ede9fe; color: #5b21b6; }
+.tag-theme      { background: #ffe4e6; color: #9f1239; }
+/* 영어 기준 */
+.tag-cohesion   { background: #ede9fe; color: #5b21b6; }
+.tag-thesis     { background: #ffe4e6; color: #9f1239; }
 .score-pill {
     display: inline-block; padding: 5px 20px; border-radius: 20px;
     font-weight: 800; font-size: 15px; color: white;
@@ -151,6 +156,7 @@ _defaults = {
     "markup_text":   "",   # ~~삭제~~(수정) 마크업 포함 원본 출력
     "edited_text":   "",   # 마크업 제거한 깔끔한 첨삭본
     "criteria":      [],
+    "lang":          "ko",
     "score":         None,
     "analysis_done": False,
     "max_tokens":    1024,
@@ -331,18 +337,25 @@ def call_gemini(prompt: str, max_tokens: int = 2048, timeout: int = 90) -> str:
             raise RuntimeError(msg)
 
 
-def render_criteria(criteria: list):
+def render_criteria(criteria: list, lang: str = "ko"):
     tag_map = {
-        "grammar": ("문법/맞춤법", "tag-grammar"),
-        "style":   ("문체/표현",   "tag-style"),
-        "logic":   ("논리/내용",   "tag-logic"),
-        "flow":    ("흐름/구성",   "tag-flow"),
+        # 한국어
+        "grammar":    ("맞춤법·문법", "tag-grammar"),
+        "structure":  ("문장 구조",   "tag-structure"),
+        "vocabulary": ("어휘·표현",   "tag-vocabulary"),
+        "logic":      ("논리·흐름",   "tag-logic"),
+        "theme":      ("주제 일관성", "tag-theme"),
+        # 영어
+        "cohesion":   ("Cohesion",    "tag-cohesion"),
+        "thesis":     ("Thesis",      "tag-thesis"),
     }
     if not criteria:
-        st.success("✅ 큰 문제가 없습니다. 전반적으로 다듬겠습니다.")
+        msg = "✅ No major issues found." if lang == "en" else "✅ 큰 문제가 없습니다."
+        st.success(msg)
         return
     for c in criteria:
-        label, css = tag_map.get(c.get("type", "style"), (c.get("label", ""), "tag-style"))
+        t = c.get("type", "grammar")
+        label, css = tag_map.get(t, (c.get("label", t), "tag-grammar"))
         st.markdown(
             f'<div class="c-item">'
             f'<span class="c-tag {css}">{label}</span>{c.get("issue","")}'
@@ -366,9 +379,8 @@ def build_txt() -> str:
 
 def build_html() -> str:
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    tag_cls = {"grammar":"grammar","style":"style","logic":"logic","flow":"flow"}
     crit_html = "".join(
-        f'<li><span class="tag {tag_cls.get(c.get("type","style"),"style")}">'
+        f'<li><span class="tag {c.get("type","grammar")}">'
         f'{c.get("label","")}</span>{esc(c.get("issue",""))}</li>'
         for c in st.session_state.criteria
     ) or "<li>없음</li>"
@@ -386,8 +398,13 @@ def build_html() -> str:
            "li{padding:10px 14px;background:#f3f4f6;border-radius:9px;font-size:13px}"
            ".tag{display:inline-block;padding:2px 9px;border-radius:20px;"
            "font-size:11px;font-weight:700;margin-right:7px}"
-           ".grammar{background:#fef3c7;color:#92400e}.style{background:#dbeafe;color:#1e40af}"
-           ".logic{background:#d1fae5;color:#065f46}.flow{background:#ede9fe;color:#5b21b6}"
+           ".grammar{background:#fef3c7;color:#92400e}"
+           ".structure{background:#dbeafe;color:#1e40af}"
+           ".vocabulary{background:#d1fae5;color:#065f46}"
+           ".logic{background:#ede9fe;color:#5b21b6}"
+           ".theme{background:#ffe4e6;color:#9f1239}"
+           ".cohesion{background:#ede9fe;color:#5b21b6}"
+           ".thesis{background:#ffe4e6;color:#9f1239}"
            ".del{background:#fee2e2;color:#991b1b;text-decoration:line-through;"
            "border-radius:4px;padding:1px 4px;font-size:13px}"
            ".ins{background:#dcfce7;color:#166534;border-radius:4px;"
@@ -542,12 +559,31 @@ if st.button(
 {st.session_state.orig_text}
 \"\"\"
 
+【언어 감지 및 검토 기준】
+글의 언어를 자동 감지하여 아래 기준을 적용하세요.
+
+▸ 한국어인 경우 (lang: "ko") — 중요 순서대로:
+  1. grammar    — 맞춤법·문법: 띄어쓰기, 조사 오류, 어미 활용
+  2. structure  — 문장 구조: 주어-서술어 불일치, 지나치게 긴 문장, 호응 오류
+  3. vocabulary — 어휘·표현: 구어체·외래어 남용, 반복 표현, 번역투
+  4. logic      — 논리·흐름: 문단 간 연결, 접속어, 주장의 근거 명확성
+  5. theme      — 주제 일관성: 본론이 서론 주제에서 벗어나는지
+  ※ 한국어 특이사항: 띄어쓰기, 경어체 일관성(합니다체/해요체 혼용),
+    주어-서술어 호응, 번역투 표현을 중점 검토
+
+▸ 영어인 경우 (lang: "en") — 중요 순서대로:
+  1. grammar    — Grammar: subject-verb agreement, tense consistency, articles, prepositions
+  2. structure  — Sentence structure: run-on sentences, fragments, dangling modifiers
+  3. vocabulary — Vocabulary & word choice: repetition, register mismatch, colloquial expressions
+  4. cohesion   — Cohesion & transitions: paragraph connections, logical flow
+  5. thesis     — Thesis clarity: clear argument, body supporting thesis
+
 【출력 형식 — 순수 JSON만, 코드블록 없이】
 {{
+  "lang": "ko" 또는 "en",
   "score": 원문_완성도_점수(0~100 정수),
   "criteria": [
-    {{"type":"grammar","label":"문법/맞춤법","issue":"설명"}},
-    {{"type":"style","label":"문체/표현","issue":"설명"}}
+    {{"type":"grammar","label":"레이블","issue":"설명"}}
   ],
   "changes": [
     {{"orig":"원문에서 수정할 정확한 구절","new":"수정된 구절"}},
@@ -556,7 +592,6 @@ if st.button(
 }}
 
 【규칙】
-- type: grammar / style / logic / flow
 - criteria: 실제 문제만, 최대 5개 (없으면 [])
 - changes: 원문 처음부터 끝까지 빠짐없이 검토, 수정 필요한 모든 부분 포함
 - "orig"는 원문에 실제로 존재하는 문자열을 정확히 복사
@@ -571,6 +606,7 @@ if st.button(
             data = json.loads(m.group())
 
             st.session_state.score    = data.get("score")
+            st.session_state.lang     = data.get("lang", "ko")
             st.session_state.criteria = data.get("criteria", [])
             changes = data.get("changes", [])
 
@@ -607,8 +643,10 @@ if st.session_state.analysis_done:
         )
         st.markdown("")
 
-    with st.expander("📋 첨삭 기준", expanded=True):
-        render_criteria(st.session_state.criteria)
+    lang = st.session_state.get("lang", "ko")
+    lang_badge = "🇰🇷 한국어" if lang == "ko" else "🇺🇸 English"
+    with st.expander(f"📋 첨삭 기준 ({lang_badge})", expanded=True):
+        render_criteria(st.session_state.criteria, lang)
 
     tab_combined, tab_final, tab_orig = st.tabs(["✍️ 첨삭본", "✨ 완성본", "📄 원문"])
 
