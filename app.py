@@ -29,7 +29,7 @@ from PIL import Image
 import google.generativeai as genai
 
 # ── 고정 상수 ─────────────────────────────────────────────────────
-GEMINI_MODEL = "gemini-3.1-flash-lite"
+GEMINI_MODEL = "gemini-2.0-flash"
 
 # 토큰 옵션 — 변경사항 JSON만 출력하므로 기존 대비 1/5 수준으로 충분
 TOKEN_OPTIONS = [
@@ -85,12 +85,24 @@ st.markdown("""
 
 .c-item {
     background: #f3f4f6; border-radius: 10px;
-    padding: 11px 15px; margin-bottom: 8px;
-    font-size: 13px; line-height: 1.7;
+    padding: 12px 16px; margin-bottom: 10px;
+    font-size: 13px; line-height: 1.8;
+}
+.c-issue { color: #111827; margin-bottom: 4px; }
+.c-detail {
+    font-size: 12px; color: #6b7280;
+    border-left: 3px solid #d1d5db;
+    padding-left: 10px; margin-top: 6px;
+    line-height: 1.7;
 }
 .c-tag {
     display: inline-block; padding: 2px 10px; border-radius: 20px;
     font-size: 11px; font-weight: 700; margin-right: 8px;
+}
+.cmp-label {
+    font-size: 12px; font-weight: 700; color: #6b7280;
+    text-transform: uppercase; letter-spacing: .05em;
+    margin-bottom: 8px;
 }
 /* 한국어 기준 */
 .tag-grammar    { background: #fef3c7; color: #92400e; }
@@ -365,9 +377,12 @@ def render_criteria(criteria: list, lang: str = "ko"):
     for c in criteria:
         t = c.get("type", "grammar")
         label, css = tag_map.get(t, (c.get("label", t), "tag-grammar"))
+        detail_html = (f'<div class="c-detail">{esc(c["detail"])}</div>'
+                       if c.get("detail") else "")
         st.markdown(
             f'<div class="c-item">'
-            f'<span class="c-tag {css}">{label}</span>{c.get("issue","")}'
+            f'<div class="c-issue"><span class="c-tag {css}">{label}</span>{esc(c.get("issue",""))}</div>'
+            f'{detail_html}'
             f'</div>', unsafe_allow_html=True,
         )
 
@@ -592,7 +607,12 @@ if st.button(
   "lang": "ko" 또는 "en",
   "score": 원문_완성도_점수(0~100 정수),
   "criteria": [
-    {{"type":"grammar","label":"레이블","issue":"설명"}}
+    {{
+      "type": "grammar",
+      "label": "레이블",
+      "issue": "문제 요약 (1~2줄)",
+      "detail": "한국어로 상세 설명 + 수정 예시 (예: '~갔다' → '~다녀왔다'). 영어 글도 반드시 한국어로 작성."
+    }}
   ],
   "changes": [
     {{"orig":"원문에서 수정할 정확한 구절","new":"수정된 구절"}},
@@ -602,6 +622,7 @@ if st.button(
 
 【규칙】
 - criteria: 실제 문제만, 최대 5개 (없으면 [])
+- detail: 반드시 한국어로. 구체적인 수정 전/후 예시 포함. 영어 글도 동일.
 - changes: 원문 처음부터 끝까지 빠짐없이 검토, 수정 필요한 모든 부분 포함
 - "orig"는 원문에 실제로 존재하는 문자열을 정확히 복사
 - 순수 JSON만 출력 (설명·코드블록 없음)""",
@@ -657,30 +678,36 @@ if st.session_state.analysis_done:
     with st.expander(f"📋 첨삭 기준 ({lang_badge})", expanded=True):
         render_criteria(st.session_state.criteria, lang)
 
-    tab_combined, tab_final, tab_orig = st.tabs(["✍️ 첨삭본", "✨ 완성본", "📄 원문"])
+    tab_cmp, tab_final = st.tabs(["📄 원문 vs 첨삭본", "✨ 최종 완성본"])
 
-    with tab_combined:
-        # 원문 + 수정 내용이 합쳐진 첨삭본
+    with tab_cmp:
+        # 원문(좌) | 첨삭본(우) 나란히 비교
         st.markdown(
             '<div class="legend">'
             '<span class="del">빨강 취소선</span> 삭제된 원문 &nbsp;&nbsp;'
-            '<span class="ins">(초록 괄호)</span> 수정된 내용 &nbsp;&nbsp;'
-            '그 외 = 변경 없는 원문</div>',
+            '<span class="ins">(초록 괄호)</span> 수정된 내용</div>',
             unsafe_allow_html=True,
         )
-        markup_html = render_markup(st.session_state.markup_text)
-        st.markdown(f'<div class="markup-box">{markup_html}</div>', unsafe_allow_html=True)
+        col_o, col_e = st.columns(2)
+        with col_o:
+            st.markdown('<p class="cmp-label">원문</p>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="orig-box" style="min-height:200px">'
+                f'{esc(st.session_state.orig_text)}</div>',
+                unsafe_allow_html=True,
+            )
+        with col_e:
+            st.markdown('<p class="cmp-label">첨삭본</p>', unsafe_allow_html=True)
+            markup_html = render_markup(st.session_state.markup_text)
+            st.markdown(
+                f'<div class="markup-box" style="min-height:200px">{markup_html}</div>',
+                unsafe_allow_html=True,
+            )
 
     with tab_final:
-        # 수정사항만 반영된 깔끔한 완성본
+        # 수정사항만 반영된 깔끔한 최종 완성본
         st.markdown(
             f'<div class="result-box">{esc(st.session_state.edited_text)}</div>',
-            unsafe_allow_html=True,
-        )
-
-    with tab_orig:
-        st.markdown(
-            f'<div class="orig-box">{esc(st.session_state.orig_text)}</div>',
             unsafe_allow_html=True,
         )
 
