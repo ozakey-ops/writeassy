@@ -29,13 +29,13 @@ from PIL import Image
 import google.generativeai as genai
 
 # ── 고정 상수 ─────────────────────────────────────────────────────
-GEMINI_MODEL = "gemini-3.5-flash"
+GEMINI_MODEL = "gemini-2.0-flash"
 
-# 토큰 옵션 — 변경사항 JSON만 출력하므로 기존 대비 1/5 수준으로 충분
+# 토큰 옵션 — detail 필드 포함 JSON 출력 기준
 TOKEN_OPTIONS = [
-    ("절약 · 512 토큰",   500,   512),
-    ("보통 · 1,024 토큰", 2000,  1024),
-    ("여유 · 2,048 토큰", 99999, 2048),
+    ("절약 · 1,024 토큰", 300,   1024),
+    ("보통 · 2,048 토큰", 1500,  2048),
+    ("여유 · 4,096 토큰", 99999, 4096),
 ]
 
 # ── 페이지 설정 ────────────────────────────────────────────────────
@@ -171,7 +171,7 @@ _defaults = {
     "lang":          "ko",
     "score":         None,
     "analysis_done": False,
-    "max_tokens":    1024,
+    "max_tokens":    2048,
 }
 for k, v in _defaults.items():
     if k not in st.session_state:
@@ -632,7 +632,10 @@ if st.button(
             cleaned = re.sub(r"```json?|```", "", raw).strip()
             m = re.search(r"\{[\s\S]*\}", cleaned)
             if not m:
-                raise RuntimeError("JSON 파싱 실패 — 응답을 확인해주세요.")
+                st.error("JSON 파싱 실패 — Gemini 원문 응답:")
+                st.code(raw[:500] if raw else "(빈 응답)", language="text")
+                st.caption("💡 토큰 슬라이더를 한 단계 올려서 다시 시도해주세요.")
+                st.stop()
             data = json.loads(m.group())
 
             st.session_state.score    = data.get("score")
@@ -646,7 +649,9 @@ if st.button(
             st.session_state.analysis_done = True
 
         except json.JSONDecodeError as e:
-            st.error(f"JSON 파싱 오류: {e}\n\n원문 응답:\n{raw[:300]}")
+            st.error(f"JSON 형식 오류: {e}")
+            st.code(raw[:500], language="text")
+            st.caption("💡 토큰 슬라이더를 한 단계 올려서 다시 시도해주세요.")
             st.stop()
         except Exception as e:
             st.error(f"첨삭 오류: {e}")
