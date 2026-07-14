@@ -19,7 +19,6 @@ import io
 import json
 import time
 import base64
-import difflib
 import concurrent.futures
 from datetime import datetime
 
@@ -102,15 +101,25 @@ st.markdown("""
     text-transform: uppercase; letter-spacing: .05em;
     margin-bottom: 8px;
 }
-/* 한국어 기준 */
-.tag-grammar    { background: #fef3c7; color: #92400e; }
-.tag-structure  { background: #dbeafe; color: #1e40af; }
-.tag-vocabulary { background: #d1fae5; color: #065f46; }
-.tag-logic      { background: #ede9fe; color: #5b21b6; }
-.tag-theme      { background: #ffe4e6; color: #9f1239; }
-/* 영어 기준 */
-.tag-cohesion   { background: #ede9fe; color: #5b21b6; }
-.tag-thesis     { background: #ffe4e6; color: #9f1239; }
+/* 공통 기준 태그 색상 (첨삭 마크업 색상과 동일) */
+.tag-grammar       { background: #fef3c7; color: #92400e; }
+.tag-structure     { background: #dbeafe; color: #1e40af; }
+.tag-vocabulary    { background: #d1fae5; color: #065f46; }
+.tag-logic         { background: #ede9fe; color: #5b21b6; }
+.tag-theme         { background: #ffe4e6; color: #9f1239; }
+/* 한국어 신규 10기준 */
+.tag-comprehension { background: #fdf4ff; color: #7e22ce; }
+.tag-conditions    { background: #fff7ed; color: #c2410c; }
+.tag-critical      { background: #f0fdfa; color: #0f766e; }
+.tag-unity         { background: #eff6ff; color: #1d4ed8; }
+/* 영어 기준 (10가지) */
+.tag-cohesion      { background: #ede9fe; color: #5b21b6; }
+.tag-thesis        { background: #ffe4e6; color: #9f1239; }
+.tag-spelling      { background: #fef9c3; color: #713f12; }
+.tag-clarity       { background: #cffafe; color: #0e7490; }
+.tag-organization  { background: #dcfce7; color: #166534; }
+.tag-repetition    { background: #fce7f3; color: #9d174d; }
+.tag-conciseness   { background: #f5f3ff; color: #6d28d9; }
 .score-pill {
     display: inline-block; padding: 5px 20px; border-radius: 20px;
     font-weight: 800; font-size: 15px; color: white;
@@ -158,12 +167,17 @@ VISION_KEY = _load_key("VISION_API_KEY")
 GEMINI_KEY = _load_key("GEMINI_API_KEY")
 KEYS_OK    = bool(VISION_KEY) and bool(GEMINI_KEY)
 
+# Gemini SDK 초기화 (앱 시작 시 1회)
+if GEMINI_KEY:
+    genai.configure(api_key=GEMINI_KEY)
+
 
 # ── 세션 상태 초기화 ──────────────────────────────────────────────
 _defaults = {
     "ocr_text":               "",
     "orig_text":              "",
-    "markup_text":            "",   # ~~삭제~~(수정) 마크업 포함 원본 출력
+    "markup_text":            "",   # ~~삭제~~(수정) 마크업 (TXT 저장용)
+    "markup_html":            "",   # 기준 유형별 컬러 HTML 마크업 (화면 표시용)
     "edited_text":            "",   # 마크업 제거한 깔끔한 첨삭본
     "criteria":               [],
     "lang":                   "ko",
@@ -207,13 +221,17 @@ with st.sidebar:
 def esc(s: str) -> str:
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
+def _cc(text: str) -> int:
+    """공백·줄바꿈 제외 글자 수 (char count)."""
+    return len(text.replace(" ", "").replace("\n", ""))
+
 
 def detect_lang_ratio(text: str) -> float:
     """한국어(CJK) 비율 반환 (0.0=영어, 1.0=완전한국어)."""
     if not text:
         return 1.0
     ko = sum(1 for c in text if '가' <= c <= '힣' or 'ㄱ' <= c <= 'ㆎ')
-    return ko / max(len(text.replace(" ", "").replace("\n", "")), 1)
+    return ko / max(_cc(text), 1)
 
 
 def estimate_start_tokens(char_count: int, level: str, text: str = "") -> int:
@@ -221,15 +239,17 @@ def estimate_start_tokens(char_count: int, level: str, text: str = "") -> int:
     글자 수, 첨삭 수준, 언어 비율 기반으로 시작 토큰 계산.
     - 한국어: 글자당 ~2 토큰  (SentencePiece 기준)
     - 영어:   글자당 ~0.25 토큰 (4자당 1 토큰)
-    - 출력 오버헤드: criteria + summary + JSON ~400 토큰
+    - fast(lite) 기준 추정 후, full(flash)은 4배 적용
+      이유: 영어 10기준(최대 5개) + reason + summary → 출력량 ~4배
     """
-    ko_ratio = detect_lang_ratio(text) if text else 1.0
-    # 언어 혼합 비율에 따른 토큰/글자 가중 평균
+    ko_ratio     = detect_lang_ratio(text) if text else 1.0
     tok_per_char = ko_ratio * 2.0 + (1 - ko_ratio) * 0.25
 
-    # 출력 추정: 변경사항(입력의 40%) + 고정 오버헤드
-    overhead = 600 if level == "full" else 350   # criteria+summary 오버헤드
-    estimated = int(char_count * tok_per_char * 0.4) + overhead
+    # fast 기준 추정 (criteria≤3, summary 1문장, 오버헤드 350)
+    fast_est = int(char_count * tok_per_char * 0.4) + 350
+
+    # full은 4배 (criteria≤5 + reason + 2문장 summary + 영어 10기준 레이블)
+    estimated = fast_est if level == "fast" else fast_est * 4
 
     for level_tok in TOKEN_LEVELS:
         if level_tok >= estimated:
@@ -237,9 +257,31 @@ def estimate_start_tokens(char_count: int, level: str, text: str = "") -> int:
     return TOKEN_LEVELS[-1]
 
 
+# 첨삭 기준 유형별 색상 (bg, fg) — 태그 색상과 동일하게 유지
+TYPE_COLORS: dict[str, tuple[str, str]] = {
+    "grammar":       ("#fef3c7", "#92400e"),
+    "structure":     ("#dbeafe", "#1e40af"),
+    "vocabulary":    ("#d1fae5", "#065f46"),
+    "logic":         ("#ede9fe", "#5b21b6"),
+    "theme":         ("#ffe4e6", "#9f1239"),
+    "comprehension": ("#fdf4ff", "#7e22ce"),
+    "conditions":    ("#fff7ed", "#c2410c"),
+    "critical":      ("#f0fdfa", "#0f766e"),
+    "unity":         ("#eff6ff", "#1d4ed8"),
+    "cohesion":      ("#ede9fe", "#5b21b6"),
+    "thesis":        ("#ffe4e6", "#9f1239"),
+    "spelling":      ("#fef9c3", "#713f12"),
+    "clarity":       ("#cffafe", "#0e7490"),
+    "organization":  ("#dcfce7", "#166534"),
+    "repetition":    ("#fce7f3", "#9d174d"),
+    "conciseness":   ("#f5f3ff", "#6d28d9"),
+}
+_DEL_DEFAULT = ("#fee2e2", "#991b1b")
+
+
 def render_markup(text: str) -> str:
     """
-    Gemini 출력의 ~~삭제~~(수정) 마크업을 컬러 HTML로 변환.
+    ~~삭제~~(수정) 텍스트 마크업 → HTML (TXT 저장본 열람 시 사용).
     패턴:
       ~~원문~~(수정본) → 빨강 취소선 + 초록 괄호 수정
       ~~원문~~         → 빨강 취소선 (삭제)
@@ -269,37 +311,55 @@ def render_markup(text: str) -> str:
 
 def apply_changes(orig_text: str, changes: list) -> tuple:
     """
-    Gemini의 변경 목록을 원문에 적용해 markup_text, edited_text 생성.
-    changes: [{"orig": "원래 구절", "new": "수정 구절"}, ...]
+    Gemini 변경 목록을 원문에 적용.
+    changes: [{"orig": "...", "new": "...", "type": "grammar"}, ...]
+    Returns: (markup_text, markup_html, edited_text)
+      - markup_text : ~~삭제~~(수정) 텍스트 형식 (TXT 내보내기용)
+      - markup_html : 기준 유형별 컬러 인라인 스타일 HTML (화면 표시용)
+      - edited_text : 마크업 없는 최종 첨삭본
     """
-    # 원문에서 각 변경 위치 탐색 후 위치순 정렬
     positioned = []
     for ch in changes:
-        orig = ch.get("orig", "").strip()
-        new  = ch.get("new",  "").strip()
+        orig  = ch.get("orig", "").strip()
+        new   = ch.get("new",  "").strip()
+        ctype = ch.get("type", "")
         if orig and orig in orig_text:
-            positioned.append((orig_text.find(orig), len(orig), orig, new))
+            positioned.append((orig_text.find(orig), len(orig), orig, new, ctype))
     positioned.sort(key=lambda x: x[0])
 
-    markup_parts, clean_parts = [], []
+    markup_parts, html_parts, clean_parts = [], [], []
     cursor = 0
-    for pos, length, orig, new in positioned:
-        if pos < cursor:          # 겹치는 변경은 건너뜀
+    for pos, length, orig, new, ctype in positioned:
+        if pos < cursor:
             continue
-        # 변경 전 그대로인 부분
-        markup_parts.append(orig_text[cursor:pos])
-        clean_parts.append(orig_text[cursor:pos])
-        # 변경 부분
+        unchanged = orig_text[cursor:pos]
+        markup_parts.append(unchanged)
+        html_parts.append(esc(unchanged).replace("\n", "<br>"))
+        clean_parts.append(unchanged)
+
+        bg, fg = TYPE_COLORS.get(ctype, _DEL_DEFAULT)
+        del_style = (f"background:{bg};color:{fg};text-decoration:line-through;"
+                     f"border-radius:4px;padding:1px 4px;font-size:13px")
+        ins_style = (f"background:{bg};color:{fg};"
+                     f"border-radius:4px;padding:1px 6px;font-weight:700;font-size:13px")
         if new:
             markup_parts.append(f"~~{orig}~~({new})")
+            html_parts.append(
+                f'<span style="{del_style}">{esc(orig)}</span>'
+                f'<span style="{ins_style}">&nbsp;{esc(new)}&nbsp;</span>'
+            )
             clean_parts.append(new)
-        else:                     # 삭제
+        else:
             markup_parts.append(f"~~{orig}~~")
+            html_parts.append(f'<span style="{del_style}">{esc(orig)}</span>')
         cursor = pos + length
 
-    markup_parts.append(orig_text[cursor:])
-    clean_parts.append(orig_text[cursor:])
-    return "".join(markup_parts), "".join(clean_parts)
+    tail = orig_text[cursor:]
+    markup_parts.append(tail)
+    html_parts.append(esc(tail).replace("\n", "<br>"))
+    clean_parts.append(tail)
+
+    return "".join(markup_parts), "".join(html_parts), "".join(clean_parts)
 
 
 def img_to_b64(pil_image: Image.Image, max_px: int = 2000, quality: int = 92) -> str:
@@ -338,7 +398,6 @@ def run_ocr(image: Image.Image) -> str:
 def call_gemini(prompt: str, max_tokens: int = 2048, timeout: int = 90,
                 model: str = MODEL_FULL) -> str:
     """Gemini 호출. timeout 초 안에 응답 없으면 TimeoutError 발생."""
-    genai.configure(api_key=GEMINI_KEY)
     gm  = genai.GenerativeModel(model)
     cfg = genai.GenerationConfig(temperature=0.3, max_output_tokens=max_tokens)
 
@@ -375,23 +434,41 @@ def call_gemini(prompt: str, max_tokens: int = 2048, timeout: int = 90,
 def render_criteria(criteria: list, lang: str = "ko"):
     if lang == "en":
         tag_map = {
-            "grammar":    ("Grammar",            "tag-grammar"),
-            "structure":  ("Sentence Structure", "tag-structure"),
-            "vocabulary": ("Vocabulary",         "tag-vocabulary"),
-            "logic":      ("Logic & Flow",       "tag-logic"),
-            "theme":      ("Theme",              "tag-theme"),
-            "cohesion":   ("Cohesion",           "tag-cohesion"),
-            "thesis":     ("Thesis",             "tag-thesis"),
+            # 기존
+            "grammar":      ("① Grammar",          "tag-grammar"),
+            "structure":    ("④ Structure",         "tag-structure"),
+            "vocabulary":   ("⑤ Vocabulary",        "tag-vocabulary"),
+            "logic":        ("⑥ Logic & Flow",      "tag-logic"),
+            "theme":        ("⑦ Topic",             "tag-theme"),
+            "cohesion":     ("⑥ Cohesion",          "tag-cohesion"),
+            "thesis":       ("⑦ Thesis",            "tag-thesis"),
+            # 신규 10기준
+            "spelling":     ("② Spelling",          "tag-spelling"),
+            "clarity":      ("③ Clarity",           "tag-clarity"),
+            "organization": ("⑧ Organization",      "tag-organization"),
+            "repetition":   ("⑨ Repetition",        "tag-repetition"),
+            "conciseness":  ("⑩ Conciseness",       "tag-conciseness"),
         }
     else:
         tag_map = {
-            "grammar":    ("맞춤법·문법", "tag-grammar"),
-            "structure":  ("문장 구조",   "tag-structure"),
-            "vocabulary": ("어휘·표현",   "tag-vocabulary"),
-            "logic":      ("논리·흐름",   "tag-logic"),
-            "theme":      ("주제 일관성", "tag-theme"),
-            "cohesion":   ("Cohesion",    "tag-cohesion"),
-            "thesis":     ("Thesis",      "tag-thesis"),
+            # 한국어 10기준 (full 모드)
+            "theme":         ("① 주제 명확성",  "tag-theme"),
+            "comprehension": ("② 제시문 이해",  "tag-comprehension"),
+            "logic":         ("③ 논리 전개",    "tag-logic"),
+            "organization":  ("④ 문단 구성",    "tag-organization"),
+            "clarity":       ("⑤ 문장 표현",    "tag-clarity"),
+            "vocabulary":    ("⑥ 어휘 선택",    "tag-vocabulary"),
+            "grammar":       ("⑦ 맞춤법·문법",  "tag-grammar"),
+            "conditions":    ("⑧ 시험 조건",    "tag-conditions"),
+            "critical":      ("⑨ 비판적 사고",  "tag-critical"),
+            "unity":         ("⑩ 완성도·통일",  "tag-unity"),
+            # 구버전 / 영어 혼용 fallback
+            "structure":    ("문장 구조",       "tag-structure"),
+            "cohesion":     ("Cohesion",        "tag-cohesion"),
+            "thesis":       ("Thesis",          "tag-thesis"),
+            "spelling":     ("철자·구두점",     "tag-spelling"),
+            "repetition":   ("반복 표현",       "tag-repetition"),
+            "conciseness":  ("간결성",          "tag-conciseness"),
         }
     if not criteria:
         msg = "✅ No major issues found." if lang == "en" else "✅ 큰 문제가 없습니다."
@@ -445,7 +522,7 @@ def build_html() -> str:
         f'{c.get("label","")}</span>{esc(c.get("issue",""))}</li>'
         for c in st.session_state.criteria
     ) or "<li>없음</li>"
-    markup_html = render_markup(st.session_state.markup_text)
+    markup_html = st.session_state.get("markup_html") or render_markup(st.session_state.markup_text)
     css = ("body{font-family:-apple-system,sans-serif;max-width:700px;margin:40px auto;"
            "padding:20px;color:#111;line-height:1.9}"
            "h1{color:#4f46e5;border-bottom:2px solid #4f46e5;padding-bottom:8px}"
@@ -464,12 +541,15 @@ def build_html() -> str:
            ".vocabulary{background:#d1fae5;color:#065f46}"
            ".logic{background:#ede9fe;color:#5b21b6}"
            ".theme{background:#ffe4e6;color:#9f1239}"
-           ".cohesion{background:#ede9fe;color:#5b21b6}"
-           ".thesis{background:#ffe4e6;color:#9f1239}"
-           ".del{background:#fee2e2;color:#991b1b;text-decoration:line-through;"
-           "border-radius:4px;padding:1px 4px;font-size:13px}"
-           ".ins{background:#dcfce7;color:#166534;border-radius:4px;"
-           "padding:1px 6px;font-weight:600;font-size:13px}"
+           ".comprehension{background:#fdf4ff;color:#7e22ce}"
+           ".conditions{background:#fff7ed;color:#c2410c}"
+           ".critical{background:#f0fdfa;color:#0f766e}"
+           ".unity{background:#eff6ff;color:#1d4ed8}"
+           ".spelling{background:#fef9c3;color:#713f12}"
+           ".clarity{background:#cffafe;color:#0e7490}"
+           ".organization{background:#dcfce7;color:#166534}"
+           ".repetition{background:#fce7f3;color:#9d174d}"
+           ".conciseness{background:#f5f3ff;color:#6d28d9}"
            ".legend{font-size:12px;color:#6b7280;margin-bottom:10px}")
     return (f'<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8">'
             f'<meta name="viewport" content="width=device-width,initial-scale=1">'
@@ -537,13 +617,12 @@ if uploaded:
             with st.spinner("Google Vision OCR 실행 중..."):
                 try:
                     text = run_ocr(image)
-                    st.session_state.ocr_text      = text
-                    st.session_state.analysis_done = False
-                    st.session_state.markup_text   = ""
-                    st.session_state.edited_text   = ""
-                    st.session_state.criteria      = []
-                    st.session_state.score         = None
-                    st.toast(f"✅ {len(text.replace(' ','').replace(chr(10),''))}자 인식 완료!")
+                    # 이전 분석 결과 전체 초기화
+                    for _k, _v in _defaults.items():
+                        if _k != "correction_level":   # 선택한 수준은 유지
+                            st.session_state[_k] = _v
+                    st.session_state.ocr_text = text
+                    st.toast(f"✅ {_cc(text)}자 인식 완료!")
                     st.rerun()
                 except Exception as e:
                     st.error(f"OCR 오류: {e}")
@@ -557,8 +636,7 @@ st.markdown('<span class="step-num">2</span> **텍스트 확인 & AI 첨삭**',
             unsafe_allow_html=True)
 
 if st.session_state.ocr_text:
-    st.success(f"✅ OCR 완료 — "
-               f"{len(st.session_state.ocr_text.replace(' ','').replace(chr(10),''))}자 인식됨")
+    st.success(f"✅ OCR 완료 — {_cc(st.session_state.ocr_text)}자 인식됨")
 
 text_input = st.text_area(
     "첨삭할 글",
@@ -568,10 +646,10 @@ text_input = st.text_area(
     label_visibility="collapsed",
 )
 
-if text_input.strip():
-    char_cnt = len(text_input.replace(" ", "").replace("\n", ""))
+_char_cnt = _cc(text_input) if text_input.strip() else 0
+if _char_cnt:
     c1, c2, c3 = st.columns(3)
-    c1.metric("글자수", f"{char_cnt:,}")
+    c1.metric("글자수", f"{_char_cnt:,}")
     c2.metric("어절수", f"{len(text_input.split()):,}")
     c3.metric("문장수", max(len(re.findall(r'[.!?。]', text_input)), 1))
 
@@ -592,46 +670,66 @@ level_choice = st.radio(
 st.session_state.correction_level = level_choice
 sel_model = MODEL_FAST if level_choice == "fast" else MODEL_FULL
 
-_char_preview = len(text_input.replace(" ", "").replace("\n", "")) if text_input.strip() else 0
-_start_tok    = estimate_start_tokens(_char_preview, level_choice, text_input) if _char_preview else 1024
+_start_tok = estimate_start_tokens(_char_cnt, level_choice, text_input) if _char_cnt else 1024
 st.markdown(
     f'<div class="tok-info">모델: <strong>{sel_model}</strong> &nbsp;|&nbsp; '
-    f'현재 글자 수 {_char_preview:,}자 → 시작 토큰 <strong>{_start_tok:,}</strong> '
+    f'현재 글자 수 {_char_cnt:,}자 → 시작 토큰 <strong>{_start_tok:,}</strong> '
     f'(부족 시 자동 증가)</div>',
     unsafe_allow_html=True,
 )
 
 
 def _build_prompt(orig: str, level: str) -> str:
-    # 압축된 언어 기준 (입력 토큰 절약)
-    lang_ko = "ko:맞춤법·띄어쓰기·어미/문장구조·호응/어휘·번역투/논리·흐름/주제일관성"
-    lang_en = "en:grammar(SVA·tense·articles)/structure/vocabulary/cohesion/thesis"
-
     if level == "fast":
-        # 문법만 — criteria≤3, reason 25자, summary 1문장
+        # ── 문법만 (lite) ─────────────────────────────────────────
+        lang_ko = "ko:맞춤법·띄어쓰기·어미/문장구조/어휘"
+        lang_en = "en:grammar(SVA·tense·articles·prepositions)/spelling·punctuation"
         return (
-            f"교정전문가.맞춤법·문법만교정.JSON만출력.\n"
+            "교정전문가.맞춤법·문법만교정.JSON만출력.\n"
             f'원문:"{orig}"\n'
             f"언어감지: {lang_ko}|{lang_en}\n"
-            '출력(JSON만):\n'
+            "출력(JSON만):\n"
             '{"lang":"ko|en","score":0-100,"summary":"1문장이내해설",'
-            '"criteria":[{"type":"grammar","label":"라벨","issue":"25자이내","reason":"교정이유20자이내"}],'
-            '"changes":[{"orig":"원문구절","new":"수정"}]}\n'
-            "규칙:criteria≤3실제문제,changes전체,orig=원문정확복사,JSON만"
+            '"criteria":[{"type":"grammar|spelling","label":"라벨","issue":"25자이내","reason":"교정이유20자이내"}],'
+            '"changes":[{"orig":"원문구절","new":"수정","type":"grammar|spelling"}]}\n'
+            "규칙:criteria≤3실제문제,changes전체,각change에type필드,orig=원문정확복사,JSON만"
         )
     else:
-        # 윤문 — criteria≤3(핵심만), reason 30자, summary 2문장
-        # changes[].orig 이 이미 수정전/후를 보여주므로 detail 중복 제거
+        # ── 윤문 첨삭 (flash) — 한국어 10기준 · 영어 10기준 완전 적용 ──
+        lang_ko = (
+            "ko10기준:"
+            "theme(주제명확성·중심주장)|comprehension(제시문이해·핵심개념파악)|"
+            "logic(논리전개·근거·예시)|organization(문단구성·서론본론결론)|"
+            "clarity(문장표현·주술호응·어순)|vocabulary(어휘선택·적절성·전문용어)|"
+            "grammar(맞춤법·띄어쓰기·문장부호)|conditions(시험조건충족·형식·글자수)|"
+            "critical(비판적사고·다각도판단·논거)|unity(완성도·통일성·톤일관성)"
+        )
+        lang_en = (
+            "en10기준:"
+            "grammar(tense·SVA·articles·prepositions·pronouns)|"
+            "spelling(errors·commas·periods·apostrophes)|"
+            "clarity(meaning immediately clear per sentence)|"
+            "structure(word-order·sentence-length·fragments)|"
+            "vocabulary(no-repetition·topic-appropriate)|"
+            "logic(sentences·paragraphs connect naturally)|"
+            "theme(answers question·no unnecessary content)|"
+            "organization(intro·body·conclusion clear)|"
+            "repetition(no overuse same words·expressions·examples)|"
+            "conciseness(not verbose·key points clearly)"
+        )
+        types_en = "grammar|spelling|clarity|structure|vocabulary|logic|theme|organization|repetition|conciseness"
+        types_ko = "theme|comprehension|logic|organization|clarity|vocabulary|grammar|conditions|critical|unity"
         return (
-            f"첨삭전문가.원문전체분석.JSON만출력.\n"
+            "첨삭전문가.원문전체분석.JSON만출력.\n"
             f'원문:"{orig}"\n'
-            f"언어감지: {lang_ko}|{lang_en}\n"
-            '출력(JSON만):\n'
-            '{"lang":"ko|en","score":0-100,"summary":"2문장이내전체해설",'
-            '"criteria":[{"type":"grammar|structure|vocabulary|logic|theme|cohesion|thesis",'
-            '"label":"라벨","issue":"30자이내","reason":"이교정이필요한이유25자이내"}],'
-            '"changes":[{"orig":"원문구절","new":"수정"}]}\n'
-            "규칙:criteria≤3핵심문제만,changes전체빠짐없이,orig=원문정확복사,JSON만"
+            f"언어감지→기준적용:\n{lang_ko}\n{lang_en}\n"
+            "출력(JSON만):\n"
+            f'{{"lang":"ko|en","score":0-100,"summary":"2문장이내전체해설",'
+            f'"criteria":[{{"type":"{types_en}(en) or {types_ko}(ko)",'
+            '"label":"라벨","issue":"30자이내","reason":"이교정이필요한이유25자이내"}}],'
+            '"changes":[{"orig":"원문구절","new":"수정","type":"해당기준유형"}]}}\n'
+            "규칙:en→10기준중실제문제≤5개,ko→10기준중실제문제≤5개,"
+            "changes전체빠짐없이,각change에type필드필수,orig=원문정확복사,JSON만"
         )
 
 
@@ -647,8 +745,9 @@ def _parse_and_store(raw: str, orig_text: str) -> bool:
     st.session_state.criteria      = data.get("criteria", [])
     st.session_state.summary       = data.get("summary", "")
     changes = data.get("changes", [])
-    markup, clean = apply_changes(orig_text, changes)
+    markup, markup_html, clean = apply_changes(orig_text, changes)
     st.session_state.markup_text   = markup
+    st.session_state.markup_html   = markup_html
     st.session_state.edited_text   = clean
     st.session_state.analysis_done = True
     return True
@@ -659,7 +758,7 @@ def _run_with_escalation(prompt: str, model: str, orig_text: str, level: str) ->
     글자 수 기반 최적 시작 토큰부터 자동 증가 재시도.
     성공 True, 8192 모두 실패 시 False (needs_extended_confirm 설정).
     """
-    char_count   = len(orig_text.replace(" ", "").replace("\n", ""))
+    char_count   = _cc(orig_text)
     start_tokens = estimate_start_tokens(char_count, level, orig_text)
     start_idx    = TOKEN_LEVELS.index(start_tokens)
 
@@ -699,7 +798,7 @@ if st.button(
     with st.spinner(f"AI 첨삭 중... ({sel_model})"):
         try:
             prompt = _build_prompt(orig, level_choice)
-            ok = _run_with_escalation(prompt, sel_model, orig, level_choice)
+            _run_with_escalation(prompt, sel_model, orig, level_choice)
         except Exception as e:
             st.error(f"첨삭 오류: {e}")
             st.caption("💡 API 키가 올바른지, 네트워크가 연결되어 있는지 확인해주세요.")
@@ -783,8 +882,9 @@ if st.session_state.analysis_done:
         # 원문(좌) | 첨삭본(우) 나란히 비교
         st.markdown(
             '<div class="legend">'
-            '<span class="del">빨강 취소선</span> 삭제된 원문 &nbsp;&nbsp;'
-            '<span class="ins">(초록 괄호)</span> 수정된 내용</div>',
+            '색상은 첨삭 기준 유형과 동일 &nbsp;|&nbsp; '
+            '<span style="text-decoration:line-through;opacity:.7">취소선</span> 삭제 &nbsp;&nbsp;'
+            '<strong>굵게</strong> 수정 내용</div>',
             unsafe_allow_html=True,
         )
         col_o, col_e = st.columns(2)
@@ -797,9 +897,9 @@ if st.session_state.analysis_done:
             )
         with col_e:
             st.markdown('<p class="cmp-label">첨삭본</p>', unsafe_allow_html=True)
-            markup_html = render_markup(st.session_state.markup_text)
+            _mhtml = st.session_state.get("markup_html") or render_markup(st.session_state.markup_text)
             st.markdown(
-                f'<div class="markup-box" style="min-height:200px">{markup_html}</div>',
+                f'<div class="markup-box" style="min-height:200px">{_mhtml}</div>',
                 unsafe_allow_html=True,
             )
 
