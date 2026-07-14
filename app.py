@@ -400,20 +400,28 @@ def render_criteria(criteria: list, lang: str = "ko"):
     for c in criteria:
         t = c.get("type", "grammar")
         label, css = tag_map.get(t, (c.get("label", t), "tag-grammar"))
-        detail_html = (f'<div class="c-detail">{esc(c["detail"])}</div>'
-                       if c.get("detail") else "")
+        # reason: 교정 이유 해설 (신규) / detail: 하위 호환 (구버전 출력 대비)
+        reason_text = c.get("reason") or c.get("detail", "")
+        reason_html = (
+            f'<div class="c-detail">'
+            f'<span style="font-size:10px;color:#9ca3af;margin-right:4px">💡 이유</span>'
+            f'{esc(reason_text)}</div>'
+        ) if reason_text else ""
         st.markdown(
             f'<div class="c-item">'
             f'<div class="c-issue"><span class="c-tag {css}">{label}</span>{esc(c.get("issue",""))}</div>'
-            f'{detail_html}'
+            f'{reason_html}'
             f'</div>', unsafe_allow_html=True,
         )
 
 
 def build_txt() -> str:
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    crit = "\n".join(f"• [{c.get('label','')}] {c.get('issue','')}"
-                     for c in st.session_state.criteria) or "없음"
+    def _crit_line(c):
+        base = f"• [{c.get('label','')}] {c.get('issue','')}"
+        reason = c.get("reason") or c.get("detail", "")
+        return base + (f"\n  └ 이유: {reason}" if reason else "")
+    crit = "\n".join(_crit_line(c) for c in st.session_state.criteria) or "없음"
     level_lbl = "문법 교정" if st.session_state.correction_level == "fast" else "윤문 첨삭"
     parts = [
         "글 첨삭 완성본 (Google Vision + Gemini)",
@@ -595,36 +603,35 @@ st.markdown(
 
 
 def _build_prompt(orig: str, level: str) -> str:
-    lang_hint = (
-        "ko:grammar(맞춤법·띄어쓰기·어미)/structure(문장구조·호응)/vocabulary(어휘·번역투·구어체)"
-        "/logic(논리·흐름·접속어)/theme(주제일관성)—경어체일관성중점"
-        "|en:grammar(SVA·tense·articles)/structure(run-on·fragments)"
-        "/vocabulary(repetition·register)/cohesion(transitions·flow)/thesis(clarity·support)"
-    )
+    # 압축된 언어 기준 (입력 토큰 절약)
+    lang_ko = "ko:맞춤법·띄어쓰기·어미/문장구조·호응/어휘·번역투/논리·흐름/주제일관성"
+    lang_en = "en:grammar(SVA·tense·articles)/structure/vocabulary/cohesion/thesis"
+
     if level == "fast":
+        # 문법만 — criteria≤3, reason 25자, summary 1문장
         return (
-            f"글쓰기 교정 전문가. 맞춤법·문법 오류만 수정 후 JSON 출력.\n\n"
-            f'원문:"{orig}"\n\n'
-            f"언어자동감지: {lang_hint}\n\n"
-            "출력(JSON만,코드블록없이):\n"
-            '{"lang":"ko|en","score":0-100,'
-            '"summary":"교정 내용 전체 한국어 해설 2문장이내",'
-            '"criteria":[{"type":"grammar","label":"라벨","issue":"문제요약","detail":"수정전→후예시40자이내"}],'
-            '"changes":[{"orig":"원문정확구절","new":"수정"}]}\n\n'
-            "규칙:criteria=grammar만최대5개,changes빠짐없이,orig=원문정확복사,JSON만"
+            f"교정전문가.맞춤법·문법만교정.JSON만출력.\n"
+            f'원문:"{orig}"\n'
+            f"언어감지: {lang_ko}|{lang_en}\n"
+            '출력(JSON만):\n'
+            '{"lang":"ko|en","score":0-100,"summary":"1문장이내해설",'
+            '"criteria":[{"type":"grammar","label":"라벨","issue":"25자이내","reason":"교정이유20자이내"}],'
+            '"changes":[{"orig":"원문구절","new":"수정"}]}\n'
+            "규칙:criteria≤3실제문제,changes전체,orig=원문정확복사,JSON만"
         )
     else:
+        # 윤문 — criteria≤3(핵심만), reason 30자, summary 2문장
+        # changes[].orig 이 이미 수정전/후를 보여주므로 detail 중복 제거
         return (
-            f"글쓰기 첨삭 전문가. 원문 전체 분석 후 JSON 출력.\n\n"
-            f'원문:"{orig}"\n\n'
-            f"언어자동감지→기준적용: {lang_hint}\n\n"
-            "출력(JSON만,코드블록없이):\n"
-            '{"lang":"ko|en","score":0-100,'
-            '"summary":"첨삭 내용 전체 한국어 해설 3문장이내",'
+            f"첨삭전문가.원문전체분석.JSON만출력.\n"
+            f'원문:"{orig}"\n'
+            f"언어감지: {lang_ko}|{lang_en}\n"
+            '출력(JSON만):\n'
+            '{"lang":"ko|en","score":0-100,"summary":"2문장이내전체해설",'
             '"criteria":[{"type":"grammar|structure|vocabulary|logic|theme|cohesion|thesis",'
-            '"label":"라벨","issue":"문제요약","detail":"한국어1문장40자이내,수정전→후예시"}],'
-            '"changes":[{"orig":"원문정확구절","new":"수정"}]}\n\n'
-            "규칙:criteria실제문제최대5개,changes전체빠짐없이,orig=원문정확복사,JSON만"
+            '"label":"라벨","issue":"30자이내","reason":"이교정이필요한이유25자이내"}],'
+            '"changes":[{"orig":"원문구절","new":"수정"}]}\n'
+            "규칙:criteria≤3핵심문제만,changes전체빠짐없이,orig=원문정확복사,JSON만"
         )
 
 
