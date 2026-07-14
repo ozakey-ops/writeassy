@@ -208,6 +208,35 @@ def esc(s: str) -> str:
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def detect_lang_ratio(text: str) -> float:
+    """한국어(CJK) 비율 반환 (0.0=영어, 1.0=완전한국어)."""
+    if not text:
+        return 1.0
+    ko = sum(1 for c in text if '가' <= c <= '힣' or 'ㄱ' <= c <= 'ㆎ')
+    return ko / max(len(text.replace(" ", "").replace("\n", "")), 1)
+
+
+def estimate_start_tokens(char_count: int, level: str, text: str = "") -> int:
+    """
+    글자 수, 첨삭 수준, 언어 비율 기반으로 시작 토큰 계산.
+    - 한국어: 글자당 ~2 토큰  (SentencePiece 기준)
+    - 영어:   글자당 ~0.25 토큰 (4자당 1 토큰)
+    - 출력 오버헤드: criteria + summary + JSON ~400 토큰
+    """
+    ko_ratio = detect_lang_ratio(text) if text else 1.0
+    # 언어 혼합 비율에 따른 토큰/글자 가중 평균
+    tok_per_char = ko_ratio * 2.0 + (1 - ko_ratio) * 0.25
+
+    # 출력 추정: 변경사항(입력의 40%) + 고정 오버헤드
+    overhead = 600 if level == "full" else 350   # criteria+summary 오버헤드
+    estimated = int(char_count * tok_per_char * 0.4) + overhead
+
+    for level_tok in TOKEN_LEVELS:
+        if level_tok >= estimated:
+            return level_tok
+    return TOKEN_LEVELS[-1]
+
+
 def render_markup(text: str) -> str:
     """
     Gemini 출력의 ~~삭제~~(수정) 마크업을 컬러 HTML로 변환.
@@ -554,9 +583,13 @@ level_choice = st.radio(
 )
 st.session_state.correction_level = level_choice
 sel_model = MODEL_FAST if level_choice == "fast" else MODEL_FULL
+
+_char_preview = len(text_input.replace(" ", "").replace("\n", "")) if text_input.strip() else 0
+_start_tok    = estimate_start_tokens(_char_preview, level_choice, text_input) if _char_preview else 1024
 st.markdown(
     f'<div class="tok-info">모델: <strong>{sel_model}</strong> &nbsp;|&nbsp; '
-    f'토큰 자동 조정: 1,024 → 2,048 → 4,096 → 8,192</div>',
+    f'현재 글자 수 {_char_preview:,}자 → 시작 토큰 <strong>{_start_tok:,}</strong> '
+    f'(부족 시 자동 증가)</div>',
     unsafe_allow_html=True,
 )
 
@@ -614,12 +647,17 @@ def _parse_and_store(raw: str, orig_text: str) -> bool:
     return True
 
 
-def _run_with_escalation(prompt: str, model: str, orig_text: str) -> bool:
+def _run_with_escalation(prompt: str, model: str, orig_text: str, level: str) -> bool:
     """
-    TOKEN_LEVELS 순서로 자동 재시도.
+    글자 수 기반 최적 시작 토큰부터 자동 증가 재시도.
     성공 True, 8192 모두 실패 시 False (needs_extended_confirm 설정).
     """
-    for i, max_tok in enumerate(TOKEN_LEVELS):
+    char_count   = len(orig_text.replace(" ", "").replace("\n", ""))
+    start_tokens = estimate_start_tokens(char_count, level, orig_text)
+    start_idx    = TOKEN_LEVELS.index(start_tokens)
+
+    for i in range(start_idx, len(TOKEN_LEVELS)):
+        max_tok = TOKEN_LEVELS[i]
         try:
             raw = call_gemini(prompt, max_tokens=max_tok, model=model)
             if _parse_and_store(raw, orig_text):
@@ -654,7 +692,7 @@ if st.button(
     with st.spinner(f"AI 첨삭 중... ({sel_model})"):
         try:
             prompt = _build_prompt(orig, level_choice)
-            ok = _run_with_escalation(prompt, sel_model, orig)
+            ok = _run_with_escalation(prompt, sel_model, orig, level_choice)
         except Exception as e:
             st.error(f"첨삭 오류: {e}")
             st.caption("💡 API 키가 올바른지, 네트워크가 연결되어 있는지 확인해주세요.")
