@@ -574,58 +574,19 @@ if st.button(
     # API 1회 호출 — 기준 분석 + 변경사항 동시 출력
     with st.spinner("AI 첨삭 중... (최대 90초)"):
         try:
+            lang_hint = ("ko:grammar(맞춤법·띄어쓰기·어미)/structure(문장구조·호응)/vocabulary(어휘·번역투·구어체)/logic(논리·흐름·접속어)/theme(주제일관성)—경어체일관성중점"
+                         "|en:grammar(SVA·tense·articles)/structure(run-on·fragments)/vocabulary(repetition·register)/cohesion(transitions·flow)/thesis(clarity·support)")
             raw = call_gemini(
-                f"""당신은 전문 글쓰기 첨삭 선생님입니다.
-아래 글을 분석하고 첨삭하여 JSON 형식으로만 출력하세요.
+                f"""글쓰기 첨삭 전문가. 원문 분석 후 JSON만 출력.
 
-【원문】
-\"\"\"
-{st.session_state.orig_text}
-\"\"\"
+원문:"{st.session_state.orig_text}"
 
-【언어 감지 및 검토 기준】
-글의 언어를 자동 감지하여 아래 기준을 적용하세요.
+언어자동감지→기준적용: {lang_hint}
 
-▸ 한국어인 경우 (lang: "ko") — 중요 순서대로:
-  1. grammar    — 맞춤법·문법: 띄어쓰기, 조사 오류, 어미 활용
-  2. structure  — 문장 구조: 주어-서술어 불일치, 지나치게 긴 문장, 호응 오류
-  3. vocabulary — 어휘·표현: 구어체·외래어 남용, 반복 표현, 번역투
-  4. logic      — 논리·흐름: 문단 간 연결, 접속어, 주장의 근거 명확성
-  5. theme      — 주제 일관성: 본론이 서론 주제에서 벗어나는지
-  ※ 한국어 특이사항: 띄어쓰기, 경어체 일관성(합니다체/해요체 혼용),
-    주어-서술어 호응, 번역투 표현을 중점 검토
+출력(JSON만,코드블록없이):
+{{"lang":"ko|en","score":0-100,"criteria":[{{"type":"grammar|structure|vocabulary|logic|theme|cohesion|thesis","label":"라벨","issue":"문제요약","detail":"한국어1문장40자이내,수정전→후예시"}}],"changes":[{{"orig":"원문정확구절","new":"수정"}}]}}
 
-▸ 영어인 경우 (lang: "en") — 중요 순서대로:
-  1. grammar    — Grammar: subject-verb agreement, tense consistency, articles, prepositions
-  2. structure  — Sentence structure: run-on sentences, fragments, dangling modifiers
-  3. vocabulary — Vocabulary & word choice: repetition, register mismatch, colloquial expressions
-  4. cohesion   — Cohesion & transitions: paragraph connections, logical flow
-  5. thesis     — Thesis clarity: clear argument, body supporting thesis
-
-【출력 형식 — 순수 JSON만, 코드블록 없이】
-{{
-  "lang": "ko" 또는 "en",
-  "score": 원문_완성도_점수(0~100 정수),
-  "criteria": [
-    {{
-      "type": "grammar",
-      "label": "레이블",
-      "issue": "문제 요약 (1~2줄)",
-      "detail": "한국어 1문장 이내 (최대 40자). 예: '학교에갔다 → 학교에 갔다'. 영어 글도 한국어로."
-    }}
-  ],
-  "changes": [
-    {{"orig":"원문에서 수정할 정확한 구절","new":"수정된 구절"}},
-    {{"orig":"삭제할 구절","new":""}}
-  ]
-}}
-
-【규칙】
-- criteria: 실제 문제만, 최대 5개 (없으면 [])
-- detail: 한국어 1문장, 40자 이내. 수정 전→후 예시 포함. 길게 쓰지 말 것.
-- changes: 원문 처음부터 끝까지 빠짐없이 검토, 수정 필요한 모든 부분 포함
-- "orig"는 원문에 실제로 존재하는 문자열을 정확히 복사
-- 순수 JSON만 출력 (설명·코드블록 없음)""",
+규칙:criteria실제문제최대5개,changes전체빠짐없이,orig=원문정확복사,JSON만""",
                 max_tokens=max_tok,
             )
 
