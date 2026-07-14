@@ -29,7 +29,7 @@ from PIL import Image
 import google.generativeai as genai
 
 # ── 고정 상수 ─────────────────────────────────────────────────────
-GEMINI_MODEL = "gemini-2.0-flash"
+GEMINI_MODEL = "gemini-3.5-flash"
 
 # 토큰 옵션 — detail 필드 포함 JSON 출력 기준
 TOKEN_OPTIONS = [
