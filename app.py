@@ -29,14 +29,12 @@ from PIL import Image
 import google.generativeai as genai
 
 # ── 고정 상수 ─────────────────────────────────────────────────────
-GEMINI_MODEL = "gemini-3.5-flash"
+MODEL_FAST     = "gemini-3.1-flash-lite"  # 문법 교정 (빠름)
+MODEL_FULL     = "gemini-3.5-flash"       # 윤문 첨삭 (정확)
 
-# 토큰 옵션
-TOKEN_OPTIONS = [
-    ("절약 · 2,048 토큰", 500,   2048),
-    ("보통 · 4,096 토큰", 2000,  4096),
-    ("여유 · 8,192 토큰", 99999, 8192),
-]
+# 토큰 자동 증가 단계: 1024 → 2048 → 4096 → 8192 → 확인 후 진행
+TOKEN_LEVELS   = [1024, 2048, 4096, 8192]
+EXTENDED_TOKENS = 16384
 
 # ── 페이지 설정 ────────────────────────────────────────────────────
 st.set_page_config(
@@ -163,15 +161,18 @@ KEYS_OK    = bool(VISION_KEY) and bool(GEMINI_KEY)
 
 # ── 세션 상태 초기화 ──────────────────────────────────────────────
 _defaults = {
-    "ocr_text":      "",
-    "orig_text":     "",
-    "markup_text":   "",   # ~~삭제~~(수정) 마크업 포함 원본 출력
-    "edited_text":   "",   # 마크업 제거한 깔끔한 첨삭본
-    "criteria":      [],
-    "lang":          "ko",
-    "score":         None,
-    "analysis_done": False,
-    "max_tokens":    4096,
+    "ocr_text":               "",
+    "orig_text":              "",
+    "markup_text":            "",   # ~~삭제~~(수정) 마크업 포함 원본 출력
+    "edited_text":            "",   # 마크업 제거한 깔끔한 첨삭본
+    "criteria":               [],
+    "lang":                   "ko",
+    "score":                  None,
+    "analysis_done":          False,
+    "correction_level":       "full",   # "fast" | "full"
+    "needs_extended_confirm": False,    # 8192 초과 시 사용자 확인 대기
+    "used_tokens":            None,     # 실제 사용된 토큰 수
+    "summary":                "",      # 첨삭 내용 전체 해설
 }
 for k, v in _defaults.items():
     if k not in st.session_state:
@@ -186,7 +187,8 @@ with st.sidebar:
 
     if KEYS_OK:
         st.success("✅ API 연결됨")
-        st.caption(f"모델: `{GEMINI_MODEL}`")
+        _cur_model = MODEL_FAST if st.session_state.get("correction_level") == "fast" else MODEL_FULL
+        st.caption(f"모델: `{_cur_model}`")
     else:
         st.error("⚠️ API 키 미설정")
         missing = []
@@ -204,15 +206,6 @@ with st.sidebar:
 # ── 유틸 함수 ─────────────────────────────────────────────────────
 def esc(s: str) -> str:
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
-def recommend_tokens(text: str) -> int:
-    """글자 수 기준으로 권장 토큰 반환 (마크업 오버헤드 2배 감안)."""
-    char_cnt = len(text.replace(" ", "").replace("\n", ""))
-    for _, limit, tokens in TOKEN_OPTIONS:
-        if char_cnt <= limit:
-            return tokens
-    return TOKEN_OPTIONS[-1][2]
 
 
 def render_markup(text: str) -> str:
@@ -313,10 +306,11 @@ def run_ocr(image: Image.Image) -> str:
     return text
 
 
-def call_gemini(prompt: str, max_tokens: int = 2048, timeout: int = 90) -> str:
+def call_gemini(prompt: str, max_tokens: int = 2048, timeout: int = 90,
+                model: str = MODEL_FULL) -> str:
     """Gemini 호출. timeout 초 안에 응답 없으면 TimeoutError 발생."""
     genai.configure(api_key=GEMINI_KEY)
-    gm  = genai.GenerativeModel(GEMINI_MODEL)
+    gm  = genai.GenerativeModel(model)
     cfg = genai.GenerationConfig(temperature=0.3, max_output_tokens=max_tokens)
 
     def _call():
@@ -391,14 +385,20 @@ def build_txt() -> str:
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     crit = "\n".join(f"• [{c.get('label','')}] {c.get('issue','')}"
                      for c in st.session_state.criteria) or "없음"
-    return "\n".join([
+    level_lbl = "문법 교정" if st.session_state.correction_level == "fast" else "윤문 첨삭"
+    parts = [
         "글 첨삭 완성본 (Google Vision + Gemini)",
-        f"작성일: {now}", "─"*40, "",
+        f"작성일: {now}  |  첨삭 수준: {level_lbl}", "─"*40, "",
         "[원문]", st.session_state.orig_text, "", "─"*40, "",
+    ]
+    if st.session_state.get("summary"):
+        parts += ["[첨삭 해설]", st.session_state.summary, "", "─"*40, ""]
+    parts += [
         "[첨삭 기준]", crit, "", "─"*40, "",
         "[변경 표시 (~~삭제~~(수정) 형식)]", st.session_state.markup_text, "", "─"*40, "",
         "[첨삭 완성본]", st.session_state.edited_text, "",
-    ])
+    ]
+    return "\n".join(parts)
 
 
 def build_html() -> str:
@@ -538,88 +538,160 @@ if text_input.strip():
     c2.metric("어절수", f"{len(text_input.split()):,}")
     c3.metric("문장수", max(len(re.findall(r'[.!?。]', text_input)), 1))
 
-    # ── 토큰 선택 ─────────────────────────────────────────────────
-    st.markdown("")
-    rec_tokens = recommend_tokens(text_input)
-    rec_label  = next(label for label, _, tok in TOKEN_OPTIONS if tok == rec_tokens)
-    tok_labels = [label for label, _, _ in TOKEN_OPTIONS]
-    tok_values = {label: tok for label, _, tok in TOKEN_OPTIONS}
+# ── 첨삭 수준 선택 ────────────────────────────────────────────────
+st.markdown("")
+level_choice = st.radio(
+    "첨삭 수준",
+    options=["fast", "full"],
+    format_func=lambda x: (
+        "⚡ 문법 교정 (빠름) — 맞춤법·문법 오류만"
+        if x == "fast" else
+        "✨ 윤문 첨삭 (정확) — 문장 구조·어휘·논리 전체"
+    ),
+    index=0 if st.session_state.correction_level == "fast" else 1,
+    horizontal=True,
+    label_visibility="collapsed",
+)
+st.session_state.correction_level = level_choice
+sel_model = MODEL_FAST if level_choice == "fast" else MODEL_FULL
+st.markdown(
+    f'<div class="tok-info">모델: <strong>{sel_model}</strong> &nbsp;|&nbsp; '
+    f'토큰 자동 조정: 1,024 → 2,048 → 4,096 → 8,192</div>',
+    unsafe_allow_html=True,
+)
 
-    sel_label = st.select_slider(
-        "📊 출력 토큰 설정",
-        options=tok_labels,
-        value=rec_label,
-        help="첨삭 마크업 포함 출력을 감안해 자동 추천합니다. 결과가 잘리면 한 단계 올려주세요.",
+
+def _build_prompt(orig: str, level: str) -> str:
+    lang_hint = (
+        "ko:grammar(맞춤법·띄어쓰기·어미)/structure(문장구조·호응)/vocabulary(어휘·번역투·구어체)"
+        "/logic(논리·흐름·접속어)/theme(주제일관성)—경어체일관성중점"
+        "|en:grammar(SVA·tense·articles)/structure(run-on·fragments)"
+        "/vocabulary(repetition·register)/cohesion(transitions·flow)/thesis(clarity·support)"
     )
-    selected_tokens = tok_values[sel_label]
-    st.session_state.max_tokens = selected_tokens
+    if level == "fast":
+        return (
+            f"글쓰기 교정 전문가. 맞춤법·문법 오류만 수정 후 JSON 출력.\n\n"
+            f'원문:"{orig}"\n\n'
+            f"언어자동감지: {lang_hint}\n\n"
+            "출력(JSON만,코드블록없이):\n"
+            '{"lang":"ko|en","score":0-100,'
+            '"summary":"교정 내용 전체 한국어 해설 2문장이내",'
+            '"criteria":[{"type":"grammar","label":"라벨","issue":"문제요약","detail":"수정전→후예시40자이내"}],'
+            '"changes":[{"orig":"원문정확구절","new":"수정"}]}\n\n'
+            "규칙:criteria=grammar만최대5개,changes빠짐없이,orig=원문정확복사,JSON만"
+        )
+    else:
+        return (
+            f"글쓰기 첨삭 전문가. 원문 전체 분석 후 JSON 출력.\n\n"
+            f'원문:"{orig}"\n\n'
+            f"언어자동감지→기준적용: {lang_hint}\n\n"
+            "출력(JSON만,코드블록없이):\n"
+            '{"lang":"ko|en","score":0-100,'
+            '"summary":"첨삭 내용 전체 한국어 해설 3문장이내",'
+            '"criteria":[{"type":"grammar|structure|vocabulary|logic|theme|cohesion|thesis",'
+            '"label":"라벨","issue":"문제요약","detail":"한국어1문장40자이내,수정전→후예시"}],'
+            '"changes":[{"orig":"원문정확구절","new":"수정"}]}\n\n'
+            "규칙:criteria실제문제최대5개,changes전체빠짐없이,orig=원문정확복사,JSON만"
+        )
 
-    approx_chars = selected_tokens
-    st.markdown(
-        f'<div class="tok-info">✅ 현재 설정: <strong>{sel_label}</strong> '
-        f'— 출력 약 <strong>{approx_chars:,}자</strong> 가능 '
-        f'{"&nbsp;🤖 자동 추천" if selected_tokens == rec_tokens else ""}</div>',
-        unsafe_allow_html=True,
-    )
 
+def _parse_and_store(raw: str, orig_text: str) -> bool:
+    """JSON 파싱 후 session_state 저장. 성공 True, 실패 False."""
+    cleaned = re.sub(r"```json?|```", "", raw).strip()
+    m = re.search(r"\{[\s\S]*\}", cleaned)
+    if not m:
+        return False
+    data = json.loads(m.group())
+    st.session_state.score         = data.get("score")
+    st.session_state.lang          = data.get("lang", "ko")
+    st.session_state.criteria      = data.get("criteria", [])
+    st.session_state.summary       = data.get("summary", "")
+    changes = data.get("changes", [])
+    markup, clean = apply_changes(orig_text, changes)
+    st.session_state.markup_text   = markup
+    st.session_state.edited_text   = clean
+    st.session_state.analysis_done = True
+    return True
+
+
+def _run_with_escalation(prompt: str, model: str, orig_text: str) -> bool:
+    """
+    TOKEN_LEVELS 순서로 자동 재시도.
+    성공 True, 8192 모두 실패 시 False (needs_extended_confirm 설정).
+    """
+    for i, max_tok in enumerate(TOKEN_LEVELS):
+        try:
+            raw = call_gemini(prompt, max_tokens=max_tok, model=model)
+            if _parse_and_store(raw, orig_text):
+                st.session_state.used_tokens            = max_tok
+                st.session_state.needs_extended_confirm = False
+                return True
+            # JSON 파싱 실패 → 토큰 부족으로 간주
+            raise ValueError("JSON 파싱 실패")
+        except (json.JSONDecodeError, ValueError):
+            if i < len(TOKEN_LEVELS) - 1:
+                next_tok = TOKEN_LEVELS[i + 1]
+                st.toast(f"⚠️ {max_tok:,} 토큰 부족 → {next_tok:,} 토큰으로 재시도 중...")
+            continue
+        except Exception:
+            raise   # 네트워크·할당량 오류는 그대로 전파
+    # 모든 레벨 실패
+    st.session_state.needs_extended_confirm = True
+    return False
+
+
+# ── AI 첨삭 버튼 ──────────────────────────────────────────────────
 if st.button(
     "🤖 AI 첨삭 시작하기 (Gemini)",
     type="primary",
     use_container_width=True,
     disabled=len(text_input.strip()) < 5,
 ):
-    st.session_state.orig_text = text_input.strip()
-    max_tok = st.session_state.max_tokens
+    orig = text_input.strip()
+    st.session_state.orig_text              = orig
+    st.session_state.needs_extended_confirm = False
 
-    # API 1회 호출 — 기준 분석 + 변경사항 동시 출력
-    with st.spinner("AI 첨삭 중... (최대 90초)"):
+    with st.spinner(f"AI 첨삭 중... ({sel_model})"):
         try:
-            lang_hint = ("ko:grammar(맞춤법·띄어쓰기·어미)/structure(문장구조·호응)/vocabulary(어휘·번역투·구어체)/logic(논리·흐름·접속어)/theme(주제일관성)—경어체일관성중점"
-                         "|en:grammar(SVA·tense·articles)/structure(run-on·fragments)/vocabulary(repetition·register)/cohesion(transitions·flow)/thesis(clarity·support)")
-            raw = call_gemini(
-                f"""글쓰기 첨삭 전문가. 원문 분석 후 JSON만 출력.
-
-원문:"{st.session_state.orig_text}"
-
-언어자동감지→기준적용: {lang_hint}
-
-출력(JSON만,코드블록없이):
-{{"lang":"ko|en","score":0-100,"criteria":[{{"type":"grammar|structure|vocabulary|logic|theme|cohesion|thesis","label":"라벨","issue":"문제요약","detail":"한국어1문장40자이내,수정전→후예시"}}],"changes":[{{"orig":"원문정확구절","new":"수정"}}]}}
-
-규칙:criteria실제문제최대5개,changes전체빠짐없이,orig=원문정확복사,JSON만""",
-                max_tokens=max_tok,
-            )
-
-            cleaned = re.sub(r"```json?|```", "", raw).strip()
-            m = re.search(r"\{[\s\S]*\}", cleaned)
-            if not m:
-                st.error("JSON 파싱 실패 — Gemini 원문 응답:")
-                st.code(raw[:500] if raw else "(빈 응답)", language="text")
-                st.caption("💡 토큰 슬라이더를 한 단계 올려서 다시 시도해주세요.")
-                st.stop()
-            data = json.loads(m.group())
-
-            st.session_state.score    = data.get("score")
-            st.session_state.lang     = data.get("lang", "ko")
-            st.session_state.criteria = data.get("criteria", [])
-            changes = data.get("changes", [])
-
-            markup, clean = apply_changes(st.session_state.orig_text, changes)
-            st.session_state.markup_text   = markup
-            st.session_state.edited_text   = clean
-            st.session_state.analysis_done = True
-
-        except json.JSONDecodeError as e:
-            st.error(f"JSON 형식 오류: {e}")
-            st.code(raw[:500], language="text")
-            st.caption("💡 토큰 슬라이더를 한 단계 올려서 다시 시도해주세요.")
-            st.stop()
+            prompt = _build_prompt(orig, level_choice)
+            ok = _run_with_escalation(prompt, sel_model, orig)
         except Exception as e:
             st.error(f"첨삭 오류: {e}")
             st.caption("💡 API 키가 올바른지, 네트워크가 연결되어 있는지 확인해주세요.")
             st.stop()
 
     st.rerun()
+
+# ── 8192 초과 시 확인 대화 ─────────────────────────────────────────
+if st.session_state.get("needs_extended_confirm"):
+    st.warning(
+        f"⚠️ 8,192 토큰으로도 처리를 완료하지 못했습니다.\n\n"
+        f"글이 매우 길거나 변경 사항이 많습니다. "
+        f"최대 {EXTENDED_TOKENS:,} 토큰으로 계속 진행하시겠습니까?"
+    )
+    col_yes, col_no = st.columns(2)
+    with col_yes:
+        if st.button("✅ 계속 진행", type="primary", use_container_width=True):
+            orig = st.session_state.orig_text
+            with st.spinner(f"AI 첨삭 중... (최대 {EXTENDED_TOKENS:,} 토큰)"):
+                try:
+                    prompt = _build_prompt(orig, st.session_state.correction_level)
+                    raw    = call_gemini(prompt, max_tokens=EXTENDED_TOKENS, model=sel_model)
+                    if _parse_and_store(raw, orig):
+                        st.session_state.used_tokens            = EXTENDED_TOKENS
+                        st.session_state.needs_extended_confirm = False
+                    else:
+                        st.error("최대 토큰으로도 처리 실패. 글을 나눠서 첨삭해주세요.")
+                        st.session_state.needs_extended_confirm = False
+                        st.stop()
+                except Exception as e:
+                    st.error(f"첨삭 오류: {e}")
+                    st.stop()
+            st.rerun()
+    with col_no:
+        if st.button("❌ 취소", use_container_width=True):
+            st.session_state.needs_extended_confirm = False
+            st.rerun()
 
 st.divider()
 
@@ -641,6 +713,22 @@ if st.session_state.analysis_done:
 
     lang = st.session_state.get("lang", "ko")
     lang_badge = "🇰🇷 한국어" if lang == "ko" else "🇺🇸 English"
+
+    # ── 첨삭 해설 ─────────────────────────────────────────────────
+    if st.session_state.get("summary"):
+        used_tok = st.session_state.get("used_tokens")
+        tok_info = f" &nbsp;|&nbsp; 사용 토큰: {used_tok:,}" if used_tok else ""
+        level_lbl = "⚡ 문법 교정" if st.session_state.correction_level == "fast" else "✨ 윤문 첨삭"
+        st.markdown(
+            f'<div style="background:#eef2ff;border-left:4px solid #4f46e5;'
+            f'border-radius:10px;padding:14px 18px;margin-bottom:12px;font-size:14px;line-height:1.8">'
+            f'<div style="font-size:11px;color:#6b7280;margin-bottom:6px">'
+            f'📝 첨삭 해설 &nbsp;|&nbsp; {level_lbl}{tok_info}</div>'
+            f'{esc(st.session_state.summary)}'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
     with st.expander(f"📋 첨삭 기준 ({lang_badge})", expanded=True):
         render_criteria(st.session_state.criteria, lang)
 
