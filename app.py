@@ -183,7 +183,7 @@ _defaults = {
     "lang":                   "ko",
     "score":                  None,
     "analysis_done":          False,
-    "correction_level":       "full",   # "fast" | "full"
+    "correction_level":       "fast",   # "fast" | "full"
     "needs_extended_confirm": False,    # 8192 초과 시 사용자 확인 대기
     "used_tokens":            None,     # 실제 사용된 토큰 수
     "summary":                "",      # 첨삭 내용 전체 해설
@@ -239,16 +239,16 @@ def estimate_start_tokens(char_count: int, level: str, text: str = "") -> int:
     글자 수, 첨삭 수준, 언어 비율 기반으로 시작 토큰 계산.
     - 한국어: 글자당 ~2 토큰  (SentencePiece 기준)
     - 영어:   글자당 ~0.25 토큰 (4자당 1 토큰)
-    - fast(lite) 기준 추정 후, full(flash)은 4배 적용
-      이유: 영어 10기준(최대 5개) + reason + summary → 출력량 ~4배
+    - full(flash)은 lite(fast) 추정치의 4배에서 시작
+      이유: 한국어/영어 10기준(최대 5개) + reason + 2문장 summary → 출력량 ~4배
     """
     ko_ratio     = detect_lang_ratio(text) if text else 1.0
     tok_per_char = ko_ratio * 2.0 + (1 - ko_ratio) * 0.25
 
-    # fast 기준 추정 (criteria≤3, summary 1문장, 오버헤드 350)
+    # lite 기준 추정 (criteria≤3, summary 1문장, 오버헤드 350)
     fast_est = int(char_count * tok_per_char * 0.4) + 350
 
-    # full은 4배 (criteria≤5 + reason + 2문장 summary + 영어 10기준 레이블)
+    # full(flash)은 lite 대비 4배 시작
     estimated = fast_est if level == "fast" else fast_est * 4
 
     for level_tok in TOKEN_LEVELS:
