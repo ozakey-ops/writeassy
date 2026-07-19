@@ -314,7 +314,7 @@ def apply_changes(orig_text: str, changes: list) -> tuple:
     Gemini 변경 목록을 원문에 적용.
     changes: [{"orig": "...", "new": "...", "type": "grammar"}, ...]
     Returns: (markup_text, markup_html, edited_text)
-      - markup_text : ~~삭제~~(수정) 텍스트 형식 (TXT 내보내기용)
+      - markup_text : ~삭제~(수정) 텍스트 형식 (TXT 내보내기용)
       - markup_html : 기준 유형별 컬러 인라인 스타일 HTML (화면 표시용)
       - edited_text : 마크업 없는 최종 첨삭본
     """
@@ -350,7 +350,7 @@ def apply_changes(orig_text: str, changes: list) -> tuple:
             )
             clean_parts.append(new)
         else:
-            markup_parts.append(f"~~{orig}~~")
+            markup_parts.append(f"~{orig}~")
             html_parts.append(f'<span style="{del_style}">{esc(orig)}</span>')
         cursor = pos + length
 
@@ -661,9 +661,9 @@ level_choice = st.radio(
     "첨삭 수준",
     options=["fast", "full"],
     format_func=lambda x: (
-        "⚡ 문법 교정 (빠름) — 맞춤법·문법 오류만"
+        "⚡ 문법 교정 (빠름) — 맞춤법·문법 오류만(은서사용)"
         if x == "fast" else
-        "✨ 윤문 첨삭 (정확) — 문장 구조·어휘·논리 전체"
+        "✨ 윤문 첨삭 (정확) — 문장 구조·어휘·논리 전체(더 공부하고 싶으면)"
     ),
     index=0 if st.session_state.correction_level == "fast" else 1,
     horizontal=True,
