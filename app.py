@@ -691,8 +691,9 @@ def _build_prompt(orig: str, level: str) -> str:
             "출력(JSON만):\n"
             '{"lang":"ko|en","score":0-100,"summary":"1문장이내해설",'
             '"criteria":[{"type":"grammar|spelling","label":"라벨","issue":"25자이내","reason":"교정이유20자이내"}],'
-            '"changes":[{"orig":"원문구절","new":"수정","type":"grammar|spelling"}]}\n'
-            "규칙:criteria≤3실제문제,changes전체,각change에type필드,orig=원문정확복사,JSON만"
+            '"changes":[{"orig":"단어또는구(최소범위)","new":"수정","type":"grammar|spelling"}]}\n'
+            "규칙:criteria≤3실제문제,changes전체,각change에type필드,"
+            "orig=원문최소범위그대로복사(문장전체금지·단어·구수준),JSON만"
         )
     else:
         # ── 윤문 첨삭 (flash) — 한국어 10기준 · 영어 10기준 완전 적용 ──
@@ -727,9 +728,10 @@ def _build_prompt(orig: str, level: str) -> str:
             f'{{"lang":"ko|en","score":0-100,"summary":"2문장이내전체해설",'
             f'"criteria":[{{"type":"{types_en}(en) or {types_ko}(ko)",'
             '"label":"라벨","issue":"30자이내","reason":"이교정이필요한이유25자이내"}}],'
-            '"changes":[{"orig":"원문구절","new":"수정","type":"해당기준유형"}]}}\n'
+            '"changes":[{"orig":"단어또는구(최소범위)","new":"수정","type":"해당기준유형"}]}}\n'
             "규칙:en→10기준중실제문제≤5개,ko→10기준중실제문제≤5개,"
-            "changes전체빠짐없이,각change에type필드필수,orig=원문정확복사,JSON만"
+            "changes전체빠짐없이,각change에type필드필수,"
+            "orig=원문최소범위그대로복사(문장전체금지·단어·구수준만),JSON만"
         )
 
 
