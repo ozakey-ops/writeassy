@@ -396,10 +396,12 @@ def run_ocr(image: Image.Image) -> str:
 
 
 def call_gemini(prompt: str, max_tokens: int = 2048, timeout: int = 90,
-                model: str = MODEL_FULL) -> str:
-    """Gemini 호출. timeout 초 안에 응답 없으면 TimeoutError 발생."""
+                model: str = MODEL_FULL, temperature: float = 0.3) -> str:
+    """Gemini 호출. timeout 초 안에 응답 없으면 TimeoutError 발생.
+    temperature: fast(lite) 0.1 — 보수적 문법 교정 / full(flash) 0.3 — 표현 윤문
+    """
     gm  = genai.GenerativeModel(model)
-    cfg = genai.GenerationConfig(temperature=0.3, max_output_tokens=max_tokens)
+    cfg = genai.GenerationConfig(temperature=temperature, max_output_tokens=max_tokens)
 
     def _call():
         return gm.generate_content(prompt, generation_config=cfg).text
@@ -693,7 +695,8 @@ def _build_prompt(orig: str, level: str) -> str:
             '"criteria":[{"type":"grammar|spelling","label":"라벨","issue":"25자이내","reason":"교정이유20자이내"}],'
             '"changes":[{"orig":"단어또는구(최소범위)","new":"수정","type":"grammar|spelling"}]}\n'
             "규칙:criteria≤3실제문제,changes전체,각change에type필드,"
-            "orig=원문최소범위그대로복사(문장전체금지·단어·구수준),JSON만"
+            "orig=원문최소범위그대로복사(문장전체금지·단어·구수준),"
+            "교정후반드시전후문맥에서자연스럽게읽히는지확인(어색하면교정하지말것),JSON만"
         )
     else:
         # ── 윤문 첨삭 (flash) — 한국어 10기준 · 영어 10기준 완전 적용 ──
@@ -763,11 +766,14 @@ def _run_with_escalation(prompt: str, model: str, orig_text: str, level: str) ->
     char_count   = _cc(orig_text)
     start_tokens = estimate_start_tokens(char_count, level, orig_text)
     start_idx    = TOKEN_LEVELS.index(start_tokens)
+    # fast(lite): 0.1 — 보수적 교정으로 어색한 표현 최소화
+    # full(flash): 0.3 — 표현 윤문에 적합한 창의성 유지
+    temp = 0.1 if level == "fast" else 0.3
 
     for i in range(start_idx, len(TOKEN_LEVELS)):
         max_tok = TOKEN_LEVELS[i]
         try:
-            raw = call_gemini(prompt, max_tokens=max_tok, model=model)
+            raw = call_gemini(prompt, max_tokens=max_tok, model=model, temperature=temp)
             if _parse_and_store(raw, orig_text):
                 st.session_state.used_tokens            = max_tok
                 st.session_state.needs_extended_confirm = False
@@ -821,8 +827,10 @@ if st.session_state.get("needs_extended_confirm"):
             orig = st.session_state.orig_text
             with st.spinner(f"AI 첨삭 중... (최대 {EXTENDED_TOKENS:,} 토큰)"):
                 try:
-                    prompt = _build_prompt(orig, st.session_state.correction_level)
-                    raw    = call_gemini(prompt, max_tokens=EXTENDED_TOKENS, model=sel_model)
+                    _lvl  = st.session_state.correction_level
+                    _temp = 0.1 if _lvl == "fast" else 0.3
+                    prompt = _build_prompt(orig, _lvl)
+                    raw    = call_gemini(prompt, max_tokens=EXTENDED_TOKENS, model=sel_model, temperature=_temp)
                     if _parse_and_store(raw, orig):
                         st.session_state.used_tokens            = EXTENDED_TOKENS
                         st.session_state.needs_extended_confirm = False
