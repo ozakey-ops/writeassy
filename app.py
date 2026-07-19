@@ -729,7 +729,7 @@ def _build_prompt(orig: str, level: str) -> str:
             f'"criteria":[{{"type":"{types_en}(en) or {types_ko}(ko)",'
             '"label":"라벨","issue":"30자이내","reason":"이교정이필요한이유25자이내"}}],'
             '"changes":[{"orig":"단어또는구(최소범위)","new":"수정","type":"해당기준유형"}]}}\n'
-            "규칙:en→10기준중실제문제≤5개,ko→10기준중실제문제≤5개,"
+            "규칙:en·ko모두→10기준중해당되는문제전부표시(개수제한없음),"
             "changes전체빠짐없이,각change에type필드필수,"
             "orig=원문최소범위그대로복사(문장전체금지·단어·구수준만),JSON만"
         )
